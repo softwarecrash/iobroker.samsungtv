@@ -1,0 +1,61 @@
+{
+  "name": "iobroker.samsungtv",
+  "version": "0.0.2",
+  "description": "Modern Samsung TV adapter with discovery and multi-device support",
+  "author": "iobroker-community-adapters <iobroker-community-adapters@gmx.de>",
+  "contributors": [
+    "iobroker-community-adapters <iobroker-community-adapters@gmx.de>"
+  ],
+  "homepage": "https://github.com/iobroker-community-adapters/ioBroker.samsungtv",
+  "license": "MIT",
+  "keywords": [
+    "ioBroker",
+    "samsung",
+    "samsung tv",
+    "tizen",
+    "upnp",
+    "ssdp",
+    "mdns",
+    "wol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iobroker-community-adapters/ioBroker.samsungtv.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "main.js",
+  "dependencies": {
+    "@iobroker/adapter-core": "^3.3.2",
+    "bonjour-service": "^1.2.1",
+    "fast-xml-parser": "^4.5.0",
+    "node-fetch": "^2.6.7",
+    "node-ssdp": "^2.9.1",
+    "samsung-remote": "^1.6.0",
+    "wake_on_lan": "^1.0.0",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@iobroker/adapter-dev": "^1.5.0",
+    "@iobroker/testing": "^5.2.2",
+    "@types/node": "^24.10.1",
+    "chai": "^4.5.0",
+    "chai-as-promised": "^7.1.2",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.5.4",
+    "mocha": "^10.4.0",
+    "prettier": "^3.7.4",
+    "sinon": "^19.0.2",
+    "sinon-chai": "^3.7.0",
+    "typescript": "~5.9.3"
+  },
+  "scripts": {
+    "test:js": "mocha --config test/mocharc.custom.json \"{!(node_modules|test)/**/*.test.js,*.test.js,test/**/test!(PackageFiles|Startup).js}\"",
+    "test:package": "mocha test/package --exit",
+    "test:integration": "mocha test/integration --exit",
+    "test": "npm run test:js && npm run test:package",
+    "lint": "eslint ."
+  }
+}

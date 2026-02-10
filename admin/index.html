@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <title>Samsung TV</title>
+    <link rel="stylesheet" type="text/css" href="../../css/adapter.css" />
+    <link rel="stylesheet" type="text/css" href="../../lib/css/materialize.css" />
+    <script type="text/javascript" src="../../lib/js/jquery-1.11.1.min.js"></script>
+    <script type="text/javascript" src="../../socket.io/socket.io.js"></script>
+    <script type="text/javascript" src="../../js/translate.js"></script>
+    <script type="text/javascript" src="../../lib/js/materialize.js"></script>
+    <script type="text/javascript" src="../../js/adapter-settings.js"></script>
+    <script type="text/javascript" src="index_m.js"></script>
+    <style>
+        #adapter-container .row { margin-bottom: 16px; }
+        #adapter-container .input-field { margin-top: 0.8rem; margin-bottom: 0.4rem; }
+        #adapter-container .input-field input { margin-bottom: 0.4rem; }
+        #adapter-container h5 { margin: 0.6rem 0 1rem; }
+        #adapter-container h6 { margin: 0.8rem 0 0.6rem; }
+        #adapter-container .btn { height: 32px; line-height: 32px; padding: 0 0.9rem; }
+        #adapter-container .table-values td,
+        #adapter-container .table-values th { padding: 4px 6px; }
+        #adapter-container .logo { padding: 0.3rem 0.5rem 0.2rem 0; width: 52px; }
+    </style>
+</head>
+<body>
+<div id="adapter-container" class="m adapter-container">
+    <div class="row">
+        <div class="col s12">
+            <img src="samsung.svg" class="logo" />
+            <h5 class="translate">Samsung TV</h5>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12">
+            <h6 class="translate">Discovery Settings</h6>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12 m6">
+            <label>
+                <input class="value" type="checkbox" id="autoScan" />
+                <span class="translate">Auto Scan</span>
+            </label>
+        </div>
+        <div class="input-field col s12 m6">
+            <input class="value" type="number" id="autoScanInterval" min="30" />
+            <label for="autoScanInterval" class="translate">Auto Scan Interval (s)</label>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12 m6">
+            <label>
+                <input class="value" type="checkbox" id="enableSsdp" />
+                <span class="translate">Enable SSDP</span>
+            </label>
+        </div>
+        <div class="input-field col s12 m6">
+            <input class="value" type="number" id="discoveryTimeout" min="2" />
+            <label for="discoveryTimeout" class="translate">Discovery Timeout (s)</label>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12 m6">
+            <label>
+                <input class="value" type="checkbox" id="enableMdns" />
+                <span class="translate">Enable mDNS</span>
+            </label>
+        </div>
+        <div class="input-field col s12 m6">
+            <input class="value" type="text" id="mdnsServices" />
+            <label for="mdnsServices" class="translate">mDNS Services</label>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12 m6">
+            <label>
+                <input class="value" type="checkbox" id="enableWol" />
+                <span class="translate">Enable Wake-on-LAN</span>
+            </label>
+        </div>
+        <div class="input-field col s12 m6">
+            <input class="value" type="number" id="pollInterval" min="10" />
+            <label for="pollInterval" class="translate">Power Poll Interval (s)</label>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12">
+            <h6 class="translate">Discovered TVs</h6>
+        </div>
+        <div class="col s12">
+            <button id="btn-scan" class="btn waves-effect" type="button"><span class="translate">Scan</span></button>
+            <span id="scan-status" class="grey-text text-darken-1"></span>
+        </div>
+        <div class="col s12">
+            <table id="discovered-table" class="table-values">
+                <thead>
+                    <tr>
+                        <th class="translate">Name</th>
+                        <th class="translate">IP</th>
+                        <th class="translate">Model</th>
+                        <th class="translate">ID</th>
+                        <th class="translate">API</th>
+                        <th class="translate">Found Via</th>
+                        <th class="translate">Action</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12">
+            <h6 class="translate">Added TVs</h6>
+        </div>
+        <div class="col s12">
+            <table id="devices-table" class="table-values">
+                <thead>
+                    <tr>
+                        <th class="translate">Name</th>
+                        <th class="translate">IP</th>
+                        <th class="translate">Model</th>
+                        <th class="translate">ID</th>
+                        <th class="translate">API</th>
+                        <th class="translate">Paired</th>
+                        <th class="translate">Action</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col s12">
+            <p class="translate grey-text text-darken-1">on save adapter restarts with new config immediately</p>
+        </div>
+    </div>
+</div>
+</body>
+</html>

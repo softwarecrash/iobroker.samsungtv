@@ -1,0 +1,81 @@
+{
+  "common": {
+    "name": "samsungtv",
+    "version": "0.0.2",
+    "news": {
+      "0.0.2": {
+        "en": "Rename adapter to Samsung TV and update admin UI/logo",
+        "de": "Adapter in Samsung TV umbenannt und Admin-UI/Logo aktualisiert"
+      },
+      "0.0.1": {
+        "en": "Initial modernized multi-device version with discovery",
+        "de": "Initiale modernisierte Multi-Device-Version mit Discovery"
+      }
+    },
+    "titleLang": {
+      "en": "Samsung TV",
+      "de": "Samsung TV"
+    },
+    "desc": {
+      "en": "Modern Samsung TV adapter with discovery and multi-device support",
+      "de": "Moderner Samsung-TV-Adapter mit Discovery und Multi-Device-Support"
+    },
+    "platform": "Javascript/Node.js",
+    "mode": "daemon",
+    "icon": "samsung.svg",
+    "extIcon": "",
+    "readme": "README.md",
+    "licenseInformation": {
+      "license": "MIT",
+      "type": "free"
+    },
+    "loglevel": "info",
+    "keywords": [
+      "samsung",
+      "samsung tv",
+      "tizen",
+      "ssdp",
+      "mdns",
+      "upnp"
+    ],
+    "enabled": false,
+    "nondeletable": false,
+    "type": "multimedia",
+    "authors": [
+      "iobroker-community-adapters <iobroker-community-adapters@gmx.de>"
+    ],
+    "connectionType": "local",
+    "dataSource": "poll",
+    "tier": 2,
+    "adminUI": {
+      "config": "html"
+    },
+    "messagebox": true,
+    "dependencies": [
+      {
+        "js-controller": ">=6.0.11"
+      }
+    ],
+    "globalDependencies": [
+      {
+        "admin": ">=7.6.17"
+      }
+    ],
+    "encryptedNative": [
+      "tokens"
+    ]
+  },
+  "native": {
+    "devices": [],
+    "tokens": "",
+    "autoScan": true,
+    "autoScanInterval": 300,
+    "discoveryTimeout": 5,
+    "pollInterval": 30,
+    "enableSsdp": true,
+    "enableMdns": true,
+    "enableWol": true,
+    "mdnsServices": "_airplay._tcp,_samsung._tcp,_samsungtv._tcp,_samsungmsf._tcp,_samsungmsf2._tcp,_smartthings._tcp"
+  },
+  "objects": []
+}
