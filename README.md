@@ -54,6 +54,7 @@ Pro TV:
 - Ältere Geräte werden nach Möglichkeit erkannt (HJ/Legacy), Feature-Umfang kann variieren.
 - Falls Legacy-Objekte existieren, werden Warnungen im Log ausgegeben.
 - Adapter wurde auf `samsungtv` umbenannt, um Konflikte mit dem alten `samsung`-Adapter zu vermeiden.
+- Bei Installation über URL wird eine Instanz automatisch angelegt. (Überspringen mit `IOBROKER_SKIP_POSTINSTALL=1`)
 
 ## How to test (Kurz)
 1. Adapter installieren und Instanz anlegen.

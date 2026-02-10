@@ -1,8 +1,12 @@
 {
   "common": {
     "name": "samsungtv",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "news": {
+      "0.0.3": {
+        "en": "Remove deprecated dependency and auto-create instance on install",
+        "de": "Veraltete Abhängigkeit entfernt und Instanz automatisch beim Installieren angelegt"
+      },
       "0.0.2": {
         "en": "Rename adapter to Samsung TV and update admin UI/logo",
         "de": "Adapter in Samsung TV umbenannt und Admin-UI/Logo aktualisiert"
@@ -41,6 +45,7 @@
     "enabled": false,
     "nondeletable": false,
     "type": "multimedia",
+    "singleton": true,
     "authors": [
       "iobroker-community-adapters <iobroker-community-adapters@gmx.de>"
     ],

@@ -9,7 +9,7 @@ const fetch = require("node-fetch");
 const https = require("https");
 const net = require("net");
 const { XMLParser } = require("fast-xml-parser");
-const SamsungRemote = require("samsung-remote");
+const LegacyRemote = require("./lib/legacy/LegacyRemote");
 const SamsungHJ = require("./lib/hj/SamsungTv");
 
 const HJ_DEVICE_CONFIG = {
@@ -618,7 +618,7 @@ async function sendKey(device, key) {
 async function legacySendKey(device, key) {
     if (!device.ip) throw new Error("No IP");
     await new Promise((resolve, reject) => {
-        const remote = new SamsungRemote({ ip: device.ip });
+        const remote = new LegacyRemote({ ip: device.ip });
         remote.send(key, (err) => (err ? reject(err) : resolve()));
     });
 }
