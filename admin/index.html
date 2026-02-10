@@ -139,11 +139,19 @@
     </div>
     <div class="row">
         <div class="input-field col s12 m4">
-            <input type="text" id="manualApi" value="tizen" />
+            <select id="manualApi">
+                <option value="auto" selected>auto</option>
+                <option value="tizen">tizen</option>
+                <option value="hj">hj</option>
+            </select>
             <label for="manualApi" class="translate">API (tizen/hj/auto)</label>
         </div>
         <div class="input-field col s12 m4">
-            <input type="text" id="manualProtocol" />
+            <select id="manualProtocol">
+                <option value="auto" selected>auto</option>
+                <option value="wss">wss</option>
+                <option value="ws">ws</option>
+            </select>
             <label for="manualProtocol" class="translate">Protocol (wss/ws/auto)</label>
         </div>
         <div class="input-field col s12 m4">

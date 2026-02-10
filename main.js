@@ -8,6 +8,7 @@ const wol = require("wake_on_lan");
 const fetch = require("node-fetch");
 const https = require("https");
 const net = require("net");
+const { execFile } = require("child_process");
 const { XMLParser } = require("fast-xml-parser");
 const LegacyRemote = require("./lib/legacy/LegacyRemote");
 const SamsungHJ = require("./lib/hj/SamsungTv");
@@ -19,6 +20,9 @@ const HJ_DEVICE_CONFIG = {
 
 const WS_CONNECT_TIMEOUT = 5000;
 const WS_SEND_DELAY = 200;
+const PAIRING_TIMEOUT = 20000;
+const HJ_INFO_TIMEOUT = 4000;
+const NO_TOKEN = "__no_token__";
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const xmlParser = new XMLParser({ ignoreAttributes: false });
@@ -31,9 +35,11 @@ let devicesByMac = new Map();
 let discoveredByIp = new Map();
 let tokens = { tizen: {}, hj: {} };
 let lastDiscovery = 0;
+let pingUnavailable = false;
 
 let pollTimer;
 let scanTimer;
+let configSaveTimer;
 
 function createAdapter() {
     return new utils.Adapter({
@@ -54,6 +60,10 @@ async function onUnload(callback) {
         if (scanTimer) {
             clearInterval(scanTimer);
             scanTimer = null;
+        }
+        if (configSaveTimer) {
+            clearTimeout(configSaveTimer);
+            configSaveTimer = null;
         }
         callback();
     } catch (e) {
@@ -142,7 +152,8 @@ async function migrateLegacyConfigFromSamsung() {
 }
 
 function getTizenToken(deviceId) {
-    return (tokens.tizen && tokens.tizen[deviceId]) || "";
+    const token = (tokens.tizen && tokens.tizen[deviceId]) || "";
+    return token === NO_TOKEN ? "" : token;
 }
 
 function getHjIdentity(deviceId) {
@@ -152,11 +163,22 @@ function getHjIdentity(deviceId) {
 function setInMemoryToken(deviceId, tokenValue) {
     if (!tokens.tizen) tokens.tizen = {};
     tokens.tizen[deviceId] = tokenValue;
+    persistTokens();
 }
 
 function setInMemoryHjIdentity(deviceId, identity) {
     if (!tokens.hj) tokens.hj = {};
     tokens.hj[deviceId] = identity;
+    persistTokens();
+}
+
+function persistTokens() {
+    try {
+        adapter.config.tokens = JSON.stringify(tokens);
+        scheduleConfigSave();
+    } catch (e) {
+        adapter.log.warn(`Failed to persist tokens: ${e.message}`);
+    }
 }
 
 function getConfiguredDevices() {
@@ -183,22 +205,97 @@ function getConfiguredDevices() {
         const safeName = ensureUniqueName(sanitizeName(rawName) || `tv-${id.slice(0, 6)}`, existingNames, `tv-${id.slice(0, 6)}`);
         existingNames.add(safeName);
 
-        const device = {
-            id,
-            name: safeName,
-            displayName: rawName,
-            ip: raw.ip || "",
-            mac: normalizeMac(raw.mac || ""),
-            model: raw.model || "",
-            api: raw.api || "unknown",
-            protocol: raw.protocol || "",
-            port: raw.port || 0,
-            uuid: raw.uuid || "",
-            source: raw.source || "config"
-        };
+            const device = {
+                id,
+                name: safeName,
+                displayName: rawName,
+                ip: raw.ip || "",
+                mac: normalizeMac(raw.mac || ""),
+                model: raw.model || "",
+                api: raw.api || "unknown",
+                protocol: raw.protocol || "",
+                port: raw.port || 0,
+                uuid: raw.uuid || "",
+                source: raw.source || "config",
+                tokenAuthSupport: typeof raw.tokenAuthSupport === "boolean" ? raw.tokenAuthSupport : undefined,
+                remoteAvailable: typeof raw.remoteAvailable === "boolean" ? raw.remoteAvailable : undefined,
+                hjAvailable: typeof raw.hjAvailable === "boolean" ? raw.hjAvailable : undefined
+            };
         result.push(device);
     }
     return result;
+}
+
+function scheduleConfigSave() {
+    if (configSaveTimer) clearTimeout(configSaveTimer);
+    configSaveTimer = setTimeout(async () => {
+        configSaveTimer = null;
+        try {
+            await adapter.extendForeignObjectAsync(`system.adapter.${adapter.namespace}`, { native: adapter.config });
+            adapter.log.debug("Persisted updated device config.");
+        } catch (e) {
+            adapter.log.warn(`Failed to persist device config: ${e.message}`);
+        }
+    }, 1500);
+}
+
+function updateConfigDeviceFromDiscovery(match, info) {
+    if (!adapter.config) return;
+    const list = Array.isArray(adapter.config.devices) ? adapter.config.devices : [];
+    if (!list.length) return;
+
+    let updated = false;
+    const infoId = normalizeDeviceId(info.id || "");
+    const infoMac = normalizeMac(info.mac || "");
+    const infoIp = info.ip || "";
+
+    for (const dev of list) {
+        if (!dev || typeof dev !== "object") continue;
+        const devId = normalizeDeviceId(normalizeId(dev.id || dev.uuid || dev.usn || dev.ip || dev.mac || ""));
+        const devMac = normalizeMac(dev.mac || "");
+        const devIp = dev.ip || "";
+        const isMatch =
+            (infoId && devId && infoId === devId) ||
+            (infoMac && devMac && infoMac === devMac) ||
+            (!infoId && !infoMac && infoIp && devIp && infoIp === devIp) ||
+            (match && match.id && devId && match.id === devId);
+        if (!isMatch) continue;
+
+        if (info.ip && dev.ip !== info.ip) {
+            dev.ip = info.ip;
+            updated = true;
+        }
+        if (info.mac && !dev.mac) {
+            dev.mac = info.mac;
+            updated = true;
+        }
+        if (info.api && dev.api !== info.api) {
+            dev.api = info.api;
+            updated = true;
+        }
+        if (info.protocol && dev.protocol !== info.protocol) {
+            dev.protocol = info.protocol;
+            updated = true;
+        }
+        if (info.port && dev.port !== info.port) {
+            dev.port = info.port;
+            updated = true;
+        }
+        if (typeof info.hjAvailable === "boolean" && dev.hjAvailable !== info.hjAvailable) {
+            dev.hjAvailable = info.hjAvailable;
+            updated = true;
+        }
+        if (typeof info.tokenAuthSupport === "boolean" && dev.tokenAuthSupport !== info.tokenAuthSupport) {
+            dev.tokenAuthSupport = info.tokenAuthSupport;
+            updated = true;
+        }
+        if (typeof info.remoteAvailable === "boolean" && dev.remoteAvailable !== info.remoteAvailable) {
+            dev.remoteAvailable = info.remoteAvailable;
+            updated = true;
+        }
+    }
+
+    if (updated) scheduleConfigSave();
 }
 
 async function checkLegacyObjects() {
@@ -242,7 +339,7 @@ async function checkLegacyObjects() {
     }
 }
 
-async function migrateDeviceNames(devices) {
+async function reconcileDeviceObjects(devices) {
     const startKey = `${adapter.namespace}.`;
     const endKey = `${adapter.namespace}.\u9999`;
     let view;
@@ -260,7 +357,6 @@ async function migrateDeviceNames(devices) {
             }
         }
     } else {
-        // fallback: brute force
         try {
             const objs = await adapter.getForeignObjectsAsync(`${adapter.namespace}.*`);
             for (const id of Object.keys(objs)) {
@@ -274,12 +370,69 @@ async function migrateDeviceNames(devices) {
         }
     }
 
-    for (const device of devices) {
-        const desiredPrefix = `${adapter.namespace}.${device.name}`;
-        const existing = deviceObjects.find((entry) => entry.obj && entry.obj.native && entry.obj.native.deviceId === device.id);
-        if (existing && existing._id !== desiredPrefix) {
-            adapter.log.info(`Renaming device objects ${existing._id} -> ${desiredPrefix}`);
-            await renamePrefix(existing._id, desiredPrefix);
+    const byId = new Map(devices.map((d) => [d.id, d]));
+    const byName = new Map(devices.map((d) => [d.name, d]));
+
+    for (const entry of deviceObjects) {
+        const objId = entry._id;
+        const obj = entry.obj || {};
+        const nativeId = obj.native && obj.native.deviceId ? normalizeDeviceId(obj.native.deviceId) : "";
+        let match = null;
+        if (nativeId && byId.has(nativeId)) {
+            match = byId.get(nativeId);
+        } else {
+            const name = objId.startsWith(`${adapter.namespace}.`)
+                ? objId.slice(adapter.namespace.length + 1)
+                : "";
+            if (name && byName.has(name)) {
+                match = byName.get(name);
+            }
+        }
+
+        if (match) {
+            const desiredPrefix = `${adapter.namespace}.${match.name}`;
+            if (!obj.native) obj.native = {};
+            if (obj.native.deviceId !== match.id) {
+                try {
+                    obj.native.deviceId = match.id;
+                    await adapter.setForeignObjectAsync(objId, { ...obj, _id: objId });
+                } catch (e) {
+                    adapter.log.warn(`Failed to update deviceId for ${objId}: ${e.message}`);
+                }
+            }
+            if (objId !== desiredPrefix) {
+                adapter.log.info(`Renaming device objects ${objId} -> ${desiredPrefix}`);
+                await renamePrefix(objId, desiredPrefix);
+            }
+            continue;
+        }
+
+        adapter.log.info(`Removing stale device objects ${objId}`);
+        await deletePrefix(objId);
+    }
+}
+
+async function deletePrefix(prefix) {
+    if (!prefix) return;
+    try {
+        await adapter.delForeignObjectAsync(prefix, { recursive: true });
+        return;
+    } catch (e) {
+        // ignore, fallback below
+    }
+    let objs = {};
+    try {
+        objs = await adapter.getForeignObjectsAsync(`${prefix}.*`);
+    } catch (e) {
+        objs = {};
+    }
+    const allIds = Object.keys(objs);
+    allIds.push(prefix);
+    for (const oldId of allIds.sort((a, b) => b.length - a.length)) {
+        try {
+            await adapter.delForeignObjectAsync(oldId, { recursive: false });
+        } catch (e) {
+            // ignore
         }
     }
 }
@@ -354,6 +507,9 @@ async function ensureDeviceObjects(device) {
     await ensureState(`${base}.info.lastSeen`, "Last Seen", "number", "value.time", 0, true);
     await ensureState(`${base}.info.paired`, "Paired", "boolean", "indicator", false, true);
     await ensureState(`${base}.info.online`, "Online", "boolean", "indicator.reachable", false, true);
+    await ensureState(`${base}.info.tokenAuthSupport`, "Token Auth Support", "boolean", "indicator", false, true);
+    await ensureState(`${base}.info.remoteAvailable`, "Remote Available", "boolean", "indicator", false, true);
+    await ensureState(`${base}.info.hjAvailable`, "HJ Available", "boolean", "indicator", false, true);
 
     await ensureState(`${base}.state.power`, "Power", "boolean", "indicator.power", false, true);
     await ensureState(`${base}.state.volume`, "Volume", "number", "value.volume", 0, true);
@@ -397,7 +553,7 @@ async function main() {
     await checkLegacyObjects();
 
     const devices = getConfiguredDevices();
-    await migrateDeviceNames(devices);
+    await reconcileDeviceObjects(devices);
 
     devicesById = new Map();
     devicesByName = new Map();
@@ -434,11 +590,23 @@ async function updateDeviceInfoStates(device) {
     await adapter.setStateAsync(`${base}.info.uuid`, device.uuid || "", true);
     await adapter.setStateAsync(`${base}.info.api`, device.api || "", true);
     await adapter.setStateAsync(`${base}.info.paired`, isDevicePaired(device), true);
+    if (typeof device.tokenAuthSupport === "boolean") {
+        await adapter.setStateAsync(`${base}.info.tokenAuthSupport`, device.tokenAuthSupport, true);
+    }
+    if (typeof device.remoteAvailable === "boolean") {
+        await adapter.setStateAsync(`${base}.info.remoteAvailable`, device.remoteAvailable, true);
+    }
+    if (typeof device.hjAvailable === "boolean") {
+        await adapter.setStateAsync(`${base}.info.hjAvailable`, device.hjAvailable, true);
+    }
 }
 
 function isDevicePaired(device) {
     if (device.api === "tizen") {
-        return !!getTizenToken(device.id);
+        const token = (tokens.tizen && tokens.tizen[device.id]) || "";
+        if (!token) return false;
+        if (token === NO_TOKEN && device.tokenAuthSupport === true) return false;
+        return true;
     }
     if (device.api === "hj") {
         return !!getHjIdentity(device.id);
@@ -448,15 +616,25 @@ function isDevicePaired(device) {
 
 async function pollDevices() {
     for (const device of devicesById.values()) {
-        try {
-            const status = await checkDeviceStatus(device);
-            await adapter.setStateAsync(`${device.name}.info.online`, status.online, true);
-            await adapter.setStateAsync(`${device.name}.state.power`, status.power, true);
-            await adapter.setStateAsync(`${device.name}.control.power`, status.power, true);
-        } catch (e) {
-            // ignore
-        }
+        await pollDevice(device);
     }
+}
+
+async function pollDevice(device) {
+    try {
+        const status = await checkDeviceStatus(device);
+        await adapter.setStateAsync(`${device.name}.info.online`, status.online, true);
+        await adapter.setStateAsync(`${device.name}.state.power`, status.power, true);
+        await adapter.setStateAsync(`${device.name}.control.power`, status.power, true);
+    } catch (e) {
+        // ignore
+    }
+}
+
+function scheduleDevicePoll(device, delayMs) {
+    if (!device) return;
+    const delay = Math.max(500, delayMs || 0);
+    setTimeout(() => pollDevice(device), delay);
 }
 
 async function checkDeviceOnline(device) {
@@ -543,10 +721,22 @@ async function checkDeviceStatusWithIp(device) {
             return { online: true, power: power === null ? true : power };
         }
     } else if (device.api === "hj") {
-        const ok = await checkPort(device.ip, 8000, 1500);
+        const info = await fetchHjInfo(device.ip, 1500);
+        if (info) {
+            const powerState = extractPowerState(info);
+            const power = interpretPowerState(powerState);
+            markSeen(device);
+            return { online: true, power: power === null ? true : power };
+        }
+        const pingOk = await pingHost(device.ip, 1200);
+        if (pingOk === true) {
+            markSeen(device);
+            return { online: true, power: false };
+        }
+        const ok = await checkPort(device.ip, 8000, 1000);
         if (ok) {
             markSeen(device);
-            return { online: true, power: true };
+            return { online: true, power: false };
         }
     } else if (device.api === "legacy") {
         const ok = await checkPort(device.ip, 55000, 1500);
@@ -718,31 +908,109 @@ function normalizeKeyInput(input) {
 
 async function setPower(device, on) {
     const status = await checkDeviceStatus(device);
+    adapter.log.debug(`Power request for ${device.name}: target=${on} api=${device.api} online=${status.online} power=${status.power}`);
     if (on) {
         if (status.power) {
             return;
         }
-        if (status.online) {
-            try {
-                await sendKey(device, "KEY_POWER");
+        if (device.api === "hj") {
+            if (adapter.config.enableWol && device.mac) {
+                wol.wake(device.mac);
+                scheduleDevicePoll(device, 6000);
+                schedulePowerFallback(device, true, "KEY_POWER", 8000);
                 return;
-            } catch (e) {
-                // fallback to WOL
+            }
+            if (status.online) {
+                try {
+                    await sendKey(device, "KEY_POWERON");
+                    scheduleDevicePoll(device, 4000);
+                    schedulePowerFallback(device, true, "KEY_POWER", 6000);
+                    return;
+                } catch (e) {
+                    try {
+                        await sendKey(device, "KEY_POWER");
+                        scheduleDevicePoll(device, 4000);
+                        return;
+                    } catch (e2) {
+                        // fallback to WOL
+                    }
+                }
+            }
+        } else {
+            if (status.online) {
+                try {
+                    await sendKey(device, "KEY_POWER");
+                    scheduleDevicePoll(device, 4000);
+                    return;
+                } catch (e) {
+                    // fallback to WOL
+                }
             }
         }
         if (adapter.config.enableWol && device.mac) {
             wol.wake(device.mac);
         }
+        scheduleDevicePoll(device, 6000);
         return;
     }
     if (status.power) {
+        if (device.api === "hj") {
+            try {
+                await sendKey(device, "KEY_POWER");
+                scheduleDevicePoll(device, 3000);
+                schedulePowerFallback(device, false, "KEY_POWEROFF", 5000);
+                return;
+            } catch (e) {
+                await sendKey(device, "KEY_POWER");
+                scheduleDevicePoll(device, 3000);
+                return;
+            }
+        }
         await sendKey(device, "KEY_POWER");
+        scheduleDevicePoll(device, 3000);
     }
+}
+
+function schedulePowerFallback(device, targetOn, fallbackKey, delayMs) {
+    if (!device) return;
+    const delay = Math.max(1000, delayMs || 0);
+    setTimeout(async () => {
+        try {
+            const status = await checkDeviceStatus(device);
+            if (targetOn && status.power) return;
+            if (!targetOn && !status.power) return;
+            if (!status.online) return;
+            adapter.log.debug(`Power fallback for ${device.name}: key=${fallbackKey}`);
+            await sendKey(device, fallbackKey);
+            scheduleDevicePoll(device, 3000);
+        } catch (e) {
+            // ignore
+        }
+    }, delay);
 }
 
 async function sendKey(device, key) {
     if (device.api === "tizen") {
-        await tizenSendKey(device, key);
+        try {
+            await tizenSendKey(device, key);
+            markSeen(device);
+            return;
+        } catch (e) {
+            if (isTizenRemoteUnsupported(e)) {
+                const hjOk = device.hjAvailable === true || (await checkPort(device.ip, 8000, 1500));
+                if (hjOk) {
+                    device.hjAvailable = true;
+                    device.api = "hj";
+                    adapter.log.warn(`Tizen remote unsupported for ${device.name}, switching to HJ`);
+                    await updateDeviceInfoStates(device);
+                    updateConfigDeviceFromDiscovery(device, { id: device.id, ip: device.ip, mac: device.mac, api: "hj", hjAvailable: true });
+                    await hjSendKey(device, key);
+                    markSeen(device);
+                    return;
+                }
+            }
+            throw e;
+        }
     } else if (device.api === "hj") {
         await hjSendKey(device, key);
     } else if (device.api === "legacy") {
@@ -752,10 +1020,28 @@ async function sendKey(device, key) {
         try {
             await tizenSendKey(device, key);
         } catch (e) {
+            if (isTizenRemoteUnsupported(e)) {
+                const hjOk = await checkPort(device.ip, 8000, 1500);
+                if (hjOk) {
+                    device.hjAvailable = true;
+                    device.api = "hj";
+                    adapter.log.warn(`Tizen remote unsupported for ${device.name}, switching to HJ`);
+                    await updateDeviceInfoStates(device);
+                    updateConfigDeviceFromDiscovery(device, { id: device.id, ip: device.ip, mac: device.mac, api: "hj", hjAvailable: true });
+                    await hjSendKey(device, key);
+                    markSeen(device);
+                    return;
+                }
+            }
             await legacySendKey(device, key);
         }
     }
     markSeen(device);
+}
+
+function isTizenRemoteUnsupported(err) {
+    if (!err || !err.message) return false;
+    return /unrecognized method value|ms\\.remote\\.control/i.test(err.message);
 }
 
 async function legacySendKey(device, key) {
@@ -776,8 +1062,32 @@ async function hjSendKey(device, key) {
     if (tv.pairing) {
         tv.pairing.identity = identity;
     }
-    await tv.connect();
-    tv.sendKey(key);
+    try {
+        await tv.connect();
+        const powerKeys = new Set(["KEY_POWER", "KEY_POWEROFF", "KEY_POWERON"]);
+        if (tv.connection && powerKeys.has(key)) {
+            tv.connection.sendKey(key, "Press");
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            tv.connection.sendKey(key, "Release");
+            adapter.log.debug(`HJ sendKey ${key} (press/release) to ${device.name}`);
+        } else {
+            tv.sendKey(key);
+            adapter.log.debug(`HJ sendKey ${key} to ${device.name}`);
+        }
+    } catch (e) {
+        adapter.log.debug(`HJ sendKey failed (${key}) for ${device.name}: ${e.message}`);
+        await tv.connect();
+        const powerKeys = new Set(["KEY_POWER", "KEY_POWEROFF", "KEY_POWERON"]);
+        if (tv.connection && powerKeys.has(key)) {
+            tv.connection.sendKey(key, "Press");
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            tv.connection.sendKey(key, "Release");
+            adapter.log.debug(`HJ sendKey retry ${key} (press/release) to ${device.name}`);
+        } else {
+            tv.sendKey(key);
+            adapter.log.debug(`HJ sendKey retry ${key} to ${device.name}`);
+        }
+    }
 }
 
 async function launchApp(device, appId) {
@@ -805,20 +1115,27 @@ async function selectSource(device, source) {
 }
 
 async function tizenSendKey(device, key) {
-    await tizenSend(device, {
-        method: "ms.remote.control",
-        params: {
-            Cmd: "Click",
-            DataOfCmd: key,
-            Option: "false",
-            TypeOfRemote: "SendRemoteKey"
+    try {
+        await tizenSend(device, {
+            method: "ms.remote.control",
+            params: {
+                Cmd: "Click",
+                DataOfCmd: key,
+                Option: "false",
+                TypeOfRemote: "SendRemoteKey"
+            }
+        });
+    } catch (e) {
+        if (isTizenRemoteUnsupported(e)) {
+            throw new Error("Tizen remote unsupported");
         }
-    });
+        throw e;
+    }
 }
 
 async function tizenSend(device, payload) {
     const token = getTizenToken(device.id);
-    const urlCandidates = buildTizenWsCandidates(device, token);
+    const urlCandidates = buildTizenWsCandidates(device, token, ["v2", "v3"]);
     let lastError;
     for (const url of urlCandidates) {
         try {
@@ -831,22 +1148,32 @@ async function tizenSend(device, payload) {
     throw lastError || new Error("Tizen WS failed");
 }
 
-function buildTizenWsCandidates(device, token) {
+function buildTizenWsCandidates(device, token, apiVersions = ["v2"]) {
     const nameBase64 = Buffer.from("ioBroker").toString("base64");
     const candidates = [];
-    const add = (protocol, port) => {
-        let url = `${protocol}://${device.ip}:${port}/api/v2/channels/samsung.remote.control?name=${nameBase64}`;
-        if (token) url += `&token=${token}`;
+    const added = new Set();
+    const versions = Array.isArray(apiVersions) ? apiVersions : [apiVersions];
+    const add = (protocol, port, apiVersion) => {
+        const key = `${protocol}:${port}:${apiVersion}`;
+        if (added.has(key)) return;
+        added.add(key);
+        let url = `${protocol}://${device.ip}:${port}/api/${apiVersion}/channels/samsung.remote.control?name=${nameBase64}`;
+        if (token && token !== NO_TOKEN) url += `&token=${token}`;
         candidates.push(url);
     };
 
     if (device.protocol && device.port) {
-        add(device.protocol, device.port);
-    } else {
-        add("wss", 8002);
-        add("ws", 8001);
+        for (const v of versions) add(device.protocol, device.port, v);
+    }
+    for (const v of versions) {
+        add("wss", 8002, v);
+        add("ws", 8001, v);
     }
     return candidates;
+}
+
+function isTizenDenyEvent(eventName) {
+    return eventName === "ms.channel.timeOut" || eventName === "ms.channel.unauthorized" || eventName === "ms.channel.error";
 }
 
 async function tizenWsRequest(url, payload) {
@@ -864,6 +1191,7 @@ async function tizenWsRequest(url, payload) {
             reject(err);
         });
 
+        let sent = false;
         ws.on("message", (data) => {
             let message;
             try {
@@ -871,7 +1199,19 @@ async function tizenWsRequest(url, payload) {
             } catch (e) {
                 return;
             }
-            if (message.event === "ms.channel.connect") {
+            if (isTizenDenyEvent(message.event)) {
+                clearTimeout(timeout);
+                ws.close();
+                return reject(new Error(`Tizen WS denied: ${message.event}`));
+            }
+            if (message.event === "ms.error") {
+                clearTimeout(timeout);
+                ws.close();
+                const msg = message?.data?.message || "Tizen error";
+                return reject(new Error(`Tizen error: ${msg}`));
+            }
+            if ((message.event === "ms.channel.connect" || message.event === "ms.channel.ready") && !sent) {
+                sent = true;
                 setTimeout(() => {
                     try {
                         ws.send(JSON.stringify(payload));
@@ -897,42 +1237,64 @@ async function tizenWsRequest(url, payload) {
 
 async function pairTizen(device) {
     adapter.log.debug(`Pairing (Tizen) started for ${device.name} (${device.ip})`);
-    const nameBase64 = Buffer.from("ioBroker").toString("base64");
-    const urls = [
-        { url: `wss://${device.ip}:8002/api/v2/channels/samsung.remote.control?name=${nameBase64}`, secure: true },
-        { url: `ws://${device.ip}:8001/api/v2/channels/samsung.remote.control?name=${nameBase64}`, secure: false }
-    ];
+    await refreshTizenCapabilities(device);
+    const urls = buildTizenWsCandidates(device, "", ["v2", "v3"]);
 
     let lastError;
-    for (const candidate of urls) {
+    for (const url of urls) {
         try {
-            const token = await pairTizenWithUrl(candidate.url, candidate.secure);
-            adapter.log.debug(`Pairing (Tizen) succeeded for ${device.name} via ${candidate.secure ? "wss" : "ws"}`);
+            const token = await pairTizenWithUrl(url);
+            const scheme = url.startsWith("wss://") ? "wss" : "ws";
+            const apiVersion = url.includes("/api/v3/") ? "v3" : "v2";
+            if (token === NO_TOKEN) {
+                adapter.log.debug(
+                    `Pairing (Tizen) succeeded without token for ${device.name} via ${scheme} ${apiVersion}`
+                );
+            } else {
+                adapter.log.debug(`Pairing (Tizen) succeeded for ${device.name} via ${scheme} ${apiVersion}`);
+            }
+            if (token === NO_TOKEN && device.tokenAuthSupport === true) {
+                throw new Error("Token required but not granted by TV");
+            }
             return token;
         } catch (e) {
-            adapter.log.debug(`Pairing (Tizen) failed for ${device.name} via ${candidate.secure ? "wss" : "ws"}: ${e.message}`);
+            const scheme = url.startsWith("wss://") ? "wss" : "ws";
+            const apiVersion = url.includes("/api/v3/") ? "v3" : "v2";
+            adapter.log.debug(
+                `Pairing (Tizen) failed for ${device.name} via ${scheme} ${apiVersion}: ${e.message}`
+            );
             lastError = e;
         }
+    }
+    if (lastError && /Pairing timeout|ms\\.channel\\.timeOut|ms\\.channel\\.unauthorized/.test(lastError.message || "")) {
+        adapter.log.warn(
+            "Pairing failed: no prompt/authorization from TV. Check Device Connection Manager > Access Notification, clear the Device List, and ensure same subnet."
+        );
     }
     throw lastError || new Error("Pairing failed");
 }
 
-async function pairTizenWithUrl(url, secure) {
+async function pairTizenWithUrl(url) {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(url, secure ? { rejectUnauthorized: false } : undefined);
+        const ws = new WebSocket(url, { rejectUnauthorized: false });
+        let done = false;
         let timeout = setTimeout(() => {
             ws.terminate();
+            if (done) return;
+            done = true;
             reject(new Error("Pairing timeout"));
-        }, WS_CONNECT_TIMEOUT * 2);
+        }, PAIRING_TIMEOUT);
 
         ws.on("error", (err) => {
+            if (done) return;
+            done = true;
             clearTimeout(timeout);
             adapter.log.debug(`Pairing WS error: ${err.message}`);
             reject(err);
         });
 
         ws.on("open", () => {
-            adapter.log.debug(`Pairing WS connected (${secure ? "wss" : "ws"})`);
+            adapter.log.debug("Pairing WS connected");
         });
 
         ws.on("message", (data) => {
@@ -942,23 +1304,38 @@ async function pairTizenWithUrl(url, secure) {
             } catch (e) {
                 return;
             }
+            if (isTizenDenyEvent(message.event)) {
+                if (done) return;
+                done = true;
+                clearTimeout(timeout);
+                ws.close();
+                return reject(new Error(`Tizen WS denied: ${message.event}`));
+            }
             if (message.event === "ms.channel.connect") {
+                if (done) return;
+                done = true;
                 clearTimeout(timeout);
                 const token = message?.data?.token || message?.data?.data?.token || "";
                 ws.close();
-                if (!token) return reject(new Error("No token received"));
+                if (!token) return resolve(NO_TOKEN);
                 resolve(token);
             }
         });
     });
 }
 
-async function pairHj(device, pin) {
-    if (!pin) throw new Error("Missing PIN");
-    adapter.log.debug(`Pairing (HJ) started for ${device.name} (${device.ip})`);
+async function hjRequestPin(device) {
+    adapter.log.debug(`Pairing (HJ) PIN requested for ${device.name} (${device.ip})`);
     const tv = new SamsungHJ({ ...HJ_DEVICE_CONFIG, ip: device.ip });
     await tv.init2();
     await tv.requestPin();
+}
+
+async function hjConfirmPin(device, pin) {
+    if (!pin) throw new Error("Missing PIN");
+    adapter.log.debug(`Pairing (HJ) confirm PIN for ${device.name} (${device.ip})`);
+    const tv = new SamsungHJ({ ...HJ_DEVICE_CONFIG, ip: device.ip });
+    await tv.init2();
     const identity = await tv.confirmPin(pin);
     adapter.log.debug(`Pairing (HJ) succeeded for ${device.name}`);
     return identity;
@@ -1015,16 +1392,37 @@ async function onMessage(obj) {
         }
         try {
             if (device.api === "hj") {
-                const identity = await pairHj(device, pin);
-                setInMemoryHjIdentity(device.id, identity);
-                await adapter.setStateAsync(`${device.name}.info.paired`, true, true);
-                adapter.sendTo(obj.from, obj.command, { ok: true, identity }, obj.callback);
-            } else {
-                const token = await pairTizen(device);
-                setInMemoryToken(device.id, token);
-                await adapter.setStateAsync(`${device.name}.info.paired`, true, true);
-                adapter.sendTo(obj.from, obj.command, { ok: true, token }, obj.callback);
+                try {
+                    if (!pin) {
+                        await hjRequestPin(device);
+                        adapter.sendTo(obj.from, obj.command, { ok: true, needsPin: true }, obj.callback);
+                        return;
+                    }
+                    const identity = await hjConfirmPin(device, pin);
+                    setInMemoryHjIdentity(device.id, identity);
+                    await adapter.setStateAsync(`${device.name}.info.paired`, true, true);
+                    adapter.sendTo(obj.from, obj.command, { ok: true, identity }, obj.callback);
+                    return;
+                } catch (e) {
+                    adapter.log.warn(`HJ pairing failed for ${device.name}: ${e.message}`);
+                    adapter.sendTo(
+                        obj.from,
+                        obj.command,
+                        { ok: false, error: `HJ pairing failed: ${e.message}` },
+                        obj.callback
+                    );
+                    return;
+                }
             }
+
+            const token = await pairTizen(device);
+            setInMemoryToken(device.id, token);
+            if (device.api !== "tizen") {
+                device.api = "tizen";
+                await updateDeviceInfoStates(device);
+            }
+            await adapter.setStateAsync(`${device.name}.info.paired`, true, true);
+            adapter.sendTo(obj.from, obj.command, { ok: true, token }, obj.callback);
         } catch (e) {
             adapter.log.debug(`Pairing failed for ${device.name}: ${e.message}`);
             adapter.sendTo(obj.from, obj.command, { ok: false, error: e.message }, obj.callback);
@@ -1088,7 +1486,17 @@ async function performDiscovery(updateKnownDevices, timeoutOverride) {
                     match.api = info.api || match.api;
                     match.protocol = info.protocol || match.protocol;
                     match.port = info.port || match.port;
+                    if (typeof info.tokenAuthSupport === "boolean") {
+                        match.tokenAuthSupport = info.tokenAuthSupport;
+                    }
+                    if (typeof info.remoteAvailable === "boolean") {
+                        match.remoteAvailable = info.remoteAvailable;
+                    }
+                    if (typeof info.hjAvailable === "boolean") {
+                        match.hjAvailable = info.hjAvailable;
+                    }
                     await updateDeviceInfoStates(match);
+                    updateConfigDeviceFromDiscovery(match, info);
                 }
             }
         }
@@ -1184,6 +1592,54 @@ async function discoverMdns(timeoutMs) {
     });
 }
 
+function parseTokenAuthSupport(info) {
+    const device = info?.device || info || {};
+    const raw =
+        device.TokenAuthSupport ??
+        device.tokenAuthSupport ??
+        device.tokenAuthSupported ??
+        info?.TokenAuthSupport ??
+        info?.tokenAuthSupport ??
+        info?.tokenAuthSupported;
+    if (typeof raw === "boolean") return raw;
+    if (typeof raw === "string") return raw.toLowerCase() === "true";
+    return undefined;
+}
+
+function parseIsSupport(info) {
+    const raw = info?.isSupport;
+    if (!raw) return {};
+    if (typeof raw === "object") return raw;
+    if (typeof raw === "string") {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            return {};
+        }
+    }
+    return {};
+}
+
+function isLikelyHjSeries(result) {
+    const modelName = (result.model || "").toUpperCase();
+    const code = (result.uuid || "").toUpperCase();
+    const combined = `${modelName} ${code}`;
+    if (/\\b1[45]_/.test(combined)) return true;
+    if (/\\b[A-Z]{2}\\d{2}[HJ][A-Z]?\\d*/.test(modelName)) return true;
+    if (/\\b(?:UE|GQ|QE)\\d{2}J/.test(modelName)) return true;
+    if (modelName.includes("JU") || modelName.includes("JS")) return true;
+    return false;
+}
+
+function applyHjInfo(result, info) {
+    result.name = result.name || info.DeviceName || "";
+    result.model = result.model || info.ModelName || info.Model || "";
+    result.uuid = result.uuid || info.UDN || info.DUID || info.DeviceID || "";
+    if (!result.id) {
+        result.id = normalizeId(info.DeviceID || info.DUID || info.UDN || "");
+    }
+}
+
 async function probeDevice(ip, seed) {
     adapter.log.debug(`Probing device ${ip}`);
     const result = {
@@ -1221,17 +1677,11 @@ async function probeDevice(ip, seed) {
         }
     }
 
-    // try HJ info
-    if (result.api === "unknown") {
-        const hj = await fetchHjInfo(ip, 2000);
-        if (hj) {
-            result.api = "hj";
-            result.port = 8000;
-            result.protocol = "ws";
-            result.id = normalizeId(hj.DeviceID || "");
-            result.name = result.name || hj.DeviceName || "";
-            adapter.log.debug(`Probe result ${ip}: api=hj protocol=ws port=8000`);
-        }
+    // try HJ info (used later for API decision)
+    const hj = await fetchHjInfo(ip, HJ_INFO_TIMEOUT);
+    if (hj) {
+        result.hjAvailable = true;
+        applyHjInfo(result, hj);
     }
 
     // try UPnP description
@@ -1259,6 +1709,34 @@ async function probeDevice(ip, seed) {
         result.id = mac;
     }
 
+    // decide API after UPnP/model info
+    const hjSeries = isLikelyHjSeries(result);
+    adapter.log.debug(
+        `HJ check ${ip}: model=${result.model || "-"} uuid=${result.uuid || "-"} hjSeries=${hjSeries} hjAvailable=${result.hjAvailable}`
+    );
+    if (result.api === "unknown" || hjSeries) {
+        if (!result.hjAvailable && hjSeries) {
+            const hjPort = await checkPort(ip, 8000, 1200);
+            if (hjPort) {
+                result.hjAvailable = true;
+            }
+        }
+        if (hjSeries) {
+            if (!result.hjAvailable) {
+                adapter.log.warn(`Model suggests H/J-series but HJ port not reachable for ${ip}; forcing HJ`);
+            }
+            result.api = "hj";
+            result.port = 8000;
+            result.protocol = "ws";
+            adapter.log.debug(`Probe result ${ip}: api=hj protocol=ws port=8000`);
+        } else if (result.hjAvailable) {
+            result.api = "hj";
+            result.port = 8000;
+            result.protocol = "ws";
+            adapter.log.debug(`Probe result ${ip}: api=hj protocol=ws port=8000`);
+        }
+    }
+
     if (result.id) {
         adapter.log.debug(
             `Probe result ${ip}: id=${result.id || "-"} mac=${result.mac || "-"} model=${result.model || "-"} api=${result.api}`
@@ -1277,6 +1755,14 @@ function applyTizenInfo(result, info) {
     result.uuid = device.id || device.udn || device.uuid || result.uuid || "";
     result.id = normalizeId(device.id || device.udn || device.uuid || info.id || result.id || "");
     result.mac = normalizeMac(device.wifiMac || device.mac || result.mac || "");
+    const tokenAuthSupport = parseTokenAuthSupport(info);
+    if (typeof tokenAuthSupport === "boolean") {
+        result.tokenAuthSupport = tokenAuthSupport;
+    }
+    const isSupport = parseIsSupport(info);
+    if (typeof isSupport.remote_available === "boolean") {
+        result.remoteAvailable = isSupport.remote_available;
+    }
 }
 
 async function fetchTizenInfo(ip, protocol, port, timeoutMs) {
@@ -1288,6 +1774,16 @@ async function fetchTizenInfo(ip, protocol, port, timeoutMs) {
     } catch (e) {
         return null;
     }
+}
+
+async function refreshTizenCapabilities(device) {
+    if (!device || !device.ip) return;
+    const info =
+        (await fetchTizenInfo(device.ip, "wss", 8002, 2000)) ||
+        (await fetchTizenInfo(device.ip, "ws", 8001, 2000));
+    if (!info) return;
+    applyTizenInfo(device, info);
+    await updateDeviceInfoStates(device);
 }
 
 async function fetchHjInfo(ip, timeoutMs) {
@@ -1350,6 +1846,24 @@ async function checkPort(ip, port, timeoutMs) {
         socket.once("error", () => finish(false));
         socket.once("timeout", () => finish(false));
         socket.connect(port, ip, () => finish(true));
+    });
+}
+
+function pingHost(ip, timeoutMs) {
+    if (pingUnavailable) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        const timeoutSec = Math.max(1, Math.ceil((timeoutMs || 1000) / 1000));
+        execFile("ping", ["-c", "1", "-W", String(timeoutSec), ip], { timeout: (timeoutMs || 1000) + 500 }, (err) => {
+            if (err) {
+                if (err.code === "ENOENT") {
+                    pingUnavailable = true;
+                    adapter.log.debug("ping command not available; skipping ICMP power checks.");
+                    return resolve(null);
+                }
+                return resolve(false);
+            }
+            resolve(true);
+        });
     });
 }
 

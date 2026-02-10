@@ -30,15 +30,21 @@ In der Admin-Oberfläche:
 4. **Speichern**.
 
 ### Pairing
-- **Tizen**: Bei **Pair** erscheint ein Hinweis am TV. Bestätigen, dann speichern.
-- **H/J-Serie**: **Pair** klicken, PIN vom TV eingeben, speichern.
+- **Tizen**: Bei **Pair** erscheint ein Hinweis am TV (meist **Zulassen/Abbrechen**, kein PIN). Bestätigen, dann speichern.
+- **H/J-Serie**: **Pair** klicken → TV zeigt PIN → PIN eingeben → speichern.
 
 Token/Identitäten werden verschlüsselt im Adapter-Config gespeichert.
+
+Falls beim Pairing **kein Hinweis** erscheint:
+- TV: **Geräte-Verbindungsmanager / Device Connection Manager** → **Zugriffsbenachrichtigung** aktivieren.
+- TV: **Geräteliste** prüfen und alte Einträge entfernen.
+- ioBroker und TV im **gleichen Subnetz** betreiben.
 
 ## Objektmodell
 Pro TV:
 - `samsungtv.0.<tvname>.info.*`
   - `id`, `ip`, `mac`, `model`, `uuid`, `api`, `lastSeen`, `paired`, `online`
+  - `tokenAuthSupport`, `remoteAvailable` (falls vom TV gemeldet)
 - `samsungtv.0.<tvname>.state.*`
   - `power`, `volume`, `muted`, `app`, `source`
 - `samsungtv.0.<tvname>.control.*`
@@ -66,6 +72,7 @@ Hinweis: Nicht jeder TV unterstützt jeden Key. Manche Keys wirken nur, wenn ein
 ## Hinweise
 - Discovery ist best effort. SSDP ist primär, mDNS optional.
 - Ältere Geräte werden nach Möglichkeit erkannt (HJ/Legacy), Feature-Umfang kann variieren.
+- Bei H/J/JU-Geräten wird HJ bevorzugt, wenn verfügbar. Tizen-Remote wird ansonsten versucht und bei „unrecognized method“ automatisch auf HJ umgestellt.
 - Falls Legacy-Objekte existieren, werden Warnungen im Log ausgegeben.
 - Adapter wurde auf `samsungtv` umbenannt, um Konflikte mit dem alten `samsung`-Adapter zu vermeiden.
 - Bei Installation über URL wird eine Instanz automatisch angelegt. (Überspringen mit `IOBROKER_SKIP_POSTINSTALL=1`)

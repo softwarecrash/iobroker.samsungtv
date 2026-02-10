@@ -140,6 +140,7 @@ function load(settings, onChange) {
         M.updateTextFields();
     }
     activateLabels();
+    initSelects();
     $(document).off("change keyup", ".input-field input", activateLabels)
         .on("change keyup", ".input-field input", activateLabels);
 }
@@ -165,13 +166,14 @@ function save(callback) {
 function renderDiscovered() {
     const $tbody = $("#discovered-table tbody");
     $tbody.empty();
-    if (!discovered.length) {
+    const filtered = discovered.filter((d) => !isAlreadyAdded(d));
+    if (!filtered.length) {
         $tbody.append(`<tr><td colspan="7" class="grey-text text-darken-1">${_("No devices found")}</td></tr>`);
         return;
     }
 
     const labels = getTableLabels();
-    discovered.forEach((d, idx) => {
+    filtered.forEach((d, idx) => {
         const sources = (d.source || []).join(", ");
         const name = d.name || d.model || d.ip || "";
         const row = $(
@@ -192,6 +194,20 @@ function renderDiscovered() {
     });
 }
 
+function isAlreadyAdded(discoveredDevice) {
+    if (!discoveredDevice) return false;
+    const did = (discoveredDevice.id || "").trim();
+    const dmac = normalizeMacInput(discoveredDevice.mac || "");
+    const dip = (discoveredDevice.ip || "").trim();
+    return devices.some((dev) => {
+        if (!dev) return false;
+        if (did && dev.id === did) return true;
+        if (dmac && normalizeMacInput(dev.mac || "") === dmac) return true;
+        if (!did && !dmac && dip && dev.ip === dip) return true;
+        return false;
+    });
+}
+
 function renderDevices() {
     const $tbody = $("#devices-table tbody");
     $tbody.empty();
@@ -205,6 +221,7 @@ function renderDevices() {
         const paired = isDevicePaired(d);
         const pairedText = paired ? _("Yes") : _("No");
         const pairedClass = paired ? "green-text text-darken-2" : "red-text text-darken-2";
+        const apiValue = d.api && d.api !== "unknown" ? d.api : "auto";
 
         const row = $(
             `<tr>
@@ -212,7 +229,14 @@ function renderDevices() {
                 <td data-title="${labels.ip}"><input type="text" class="device-ip" data-idx="${idx}" value="${d.ip || ""}" /></td>
                 <td data-title="${labels.model}">${d.model || ""}</td>
                 <td data-title="${labels.id}">${d.id || ""}</td>
-                <td data-title="${labels.api}">${d.api || ""}</td>
+                <td data-title="${labels.api}">
+                    <select class="device-api" data-idx="${idx}">
+                        <option value="auto"${apiValue === "auto" ? " selected" : ""}>auto</option>
+                        <option value="tizen"${apiValue === "tizen" ? " selected" : ""}>tizen</option>
+                        <option value="hj"${apiValue === "hj" ? " selected" : ""}>hj</option>
+                        <option value="legacy"${apiValue === "legacy" ? " selected" : ""}>legacy</option>
+                    </select>
+                </td>
                 <td data-title="${labels.paired}" class="${pairedClass}">${pairedText}</td>
                 <td data-title="${labels.action}">
                     <button class="btn btn-small waves-effect values-buttons btn-pair" type="button" data-idx="${idx}">${_("Pair")}</button>
@@ -235,6 +259,14 @@ function renderDevices() {
             onChangeCb && onChangeCb();
         });
 
+        row.find(".device-api").on("change", function () {
+            const i = parseInt($(this).data("idx"), 10);
+            const value = normalizeApiInput($(this).val());
+            devices[i].api = value;
+            onChangeCb && onChangeCb();
+            renderDevices();
+        });
+
         row.find(".btn-remove").on("click", function () {
             const i = parseInt($(this).data("idx"), 10);
             removeDevice(i);
@@ -247,6 +279,7 @@ function renderDevices() {
 
         $tbody.append(row);
     });
+    initSelects();
 }
 
 function addDeviceFromDiscovery(d) {
@@ -268,7 +301,10 @@ function addDeviceFromDiscovery(d) {
         protocol: d.protocol || "",
         port: d.port || 0,
         uuid: d.uuid || "",
-        source: d.source || ""
+        source: d.source || "",
+        hjAvailable: typeof d.hjAvailable === "boolean" ? d.hjAvailable : undefined,
+        tokenAuthSupport: typeof d.tokenAuthSupport === "boolean" ? d.tokenAuthSupport : undefined,
+        remoteAvailable: typeof d.remoteAvailable === "boolean" ? d.remoteAvailable : undefined
     });
 
     onChangeCb && onChangeCb();
@@ -327,10 +363,11 @@ function clearManualForm() {
     $("#manualIp").val("");
     $("#manualMac").val("");
     $("#manualId").val("");
-    $("#manualProtocol").val("");
+    $("#manualProtocol").val("auto");
     $("#manualPort").val("");
-    $("#manualApi").val("tizen");
+    $("#manualApi").val("auto");
     activateLabels();
+    initSelects();
     if (typeof M !== "undefined" && M.updateTextFields) {
         M.updateTextFields();
     }
@@ -350,22 +387,36 @@ function removeDevice(idx) {
 function isDevicePaired(dev) {
     if (!dev || !dev.id) return false;
     if (dev.api === "hj") return !!tokens.hj[dev.id];
+    if (dev.api === "legacy") return false;
+    if (dev.api === "unknown") return !!tokens.tizen[dev.id] || !!tokens.hj[dev.id];
     return !!tokens.tizen[dev.id];
 }
 
 function pairDevice(dev) {
     if (!dev || !dev.id) return;
     if (dev.api === "hj") {
-        const pin = window.prompt(_("Enter the PIN shown on the TV:"));
-        if (!pin) return;
-        sendTo(null, "pair", { id: dev.id, pin, device: dev }, (res) => {
+        sendTo(null, "pair", { id: dev.id, device: dev }, (res) => {
             if (res && res.ok && res.identity) {
                 tokens.hj[dev.id] = res.identity;
                 onChangeCb && onChangeCb();
                 renderDevices();
-            } else {
-                alert(res && res.error ? res.error : _("Pairing failed"));
+                return;
             }
+            if (res && res.ok && res.needsPin) {
+                const pin = window.prompt(_("Enter the PIN shown on the TV:"));
+                if (!pin) return;
+                sendTo(null, "pair", { id: dev.id, pin, device: dev }, (res2) => {
+                    if (res2 && res2.ok && res2.identity) {
+                        tokens.hj[dev.id] = res2.identity;
+                        onChangeCb && onChangeCb();
+                        renderDevices();
+                    } else {
+                        alert(res2 && res2.error ? res2.error : _("Pairing failed"));
+                    }
+                });
+                return;
+            }
+            alert(res && res.error ? res.error : _("Pairing failed"));
         });
         return;
     }
@@ -615,4 +666,16 @@ function activateLabels() {
             $label.removeClass("active");
         }
     });
+}
+
+function initSelects() {
+    try {
+        if (typeof M !== "undefined" && M.FormSelect) {
+            M.FormSelect.init(document.querySelectorAll("select"));
+        } else if ($ && $.fn && $.fn.formSelect) {
+            $("select").formSelect();
+        }
+    } catch (e) {
+        // ignore
+    }
 }
