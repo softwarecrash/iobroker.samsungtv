@@ -1173,7 +1173,7 @@ function isTizenDenyEvent(eventName) {
 async function tizenWsRequest(url, payload) {
     return new Promise((resolve, reject) => {
         const safeUrl = url.replace(/token=[^&]+/i, "token=***");
-        const ws = new WebSocket(url, { rejectUnauthorized: false });
+        const ws = new WebSocket(url, buildTizenWsOptions(url));
         let timeout = setTimeout(() => {
             ws.terminate();
             reject(new Error("WebSocket timeout"));
@@ -1226,7 +1226,30 @@ async function tizenWsRequest(url, payload) {
         ws.on("open", () => {
             adapter.log.debug(`WS connected: ${safeUrl}`);
         });
+
+        ws.on("close", (code, reason) => {
+            adapter.log.debug(`WS closed: ${safeUrl} code=${code} reason=${reason ? reason.toString() : ""}`);
+        });
     });
+}
+
+function buildTizenWsOptions(url) {
+    try {
+        const parsed = new URL(url);
+        const originScheme = parsed.protocol === "wss:" ? "https" : "http";
+        const origin = `${originScheme}://${parsed.host}`;
+        return {
+            rejectUnauthorized: false,
+            handshakeTimeout: WS_CONNECT_TIMEOUT,
+            perMessageDeflate: false,
+            headers: {
+                Origin: origin,
+                "User-Agent": "ioBroker.samsungtv"
+            }
+        };
+    } catch (e) {
+        return { rejectUnauthorized: false, handshakeTimeout: WS_CONNECT_TIMEOUT, perMessageDeflate: false };
+    }
 }
 
 async function pairTizen(device) {
@@ -1270,7 +1293,7 @@ async function pairTizen(device) {
 
 async function pairTizenWithUrl(url) {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(url, { rejectUnauthorized: false });
+        const ws = new WebSocket(url, buildTizenWsOptions(url));
         let done = false;
         let timeout = setTimeout(() => {
             ws.terminate();
@@ -1289,6 +1312,11 @@ async function pairTizenWithUrl(url) {
 
         ws.on("open", () => {
             adapter.log.debug("Pairing WS connected");
+        });
+
+        ws.on("close", (code, reason) => {
+            if (done) return;
+            adapter.log.debug(`Pairing WS closed code=${code} reason=${reason ? reason.toString() : ""}`);
         });
 
         ws.on("message", (data) => {
