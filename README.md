@@ -2,89 +2,91 @@
 
 # ioBroker.samsungtv
 
-Moderner Samsung-TV-Adapter mit automatischer Discovery und Multi-Device-Management in einer einzigen Instanz.
+Modern Samsung TV adapter with automatic discovery and multi-device management in a single instance.
+
+German documentation is available at `doc/de/README.md`.
 
 ## Features
-- Automatische Discovery via SSDP/UPnP und optional mDNS
-- Mehrere TVs in einer Instanz: `samsungtv.0.<tvname>.*`
-- Tizen WebSocket API (8001/8002) + Pairing/Token
-- H/J-Serie PIN-Pairing (best effort)
+- Automatic discovery via SSDP/UPnP and optional mDNS
+- Multiple TVs in one instance: `samsungtv.0.<tvname>.*`
+- Tizen WebSocket API (8001/8002) + pairing/token
+- H/J series PIN pairing (best effort)
 - Wake-on-LAN (optional)
-- Stabiler Geräteabgleich via ID/UUID/MAC, auch bei Namensänderungen
-- Keine Token-Ausgabe in Logs oder UI (Token verschlüsselt gespeichert)
+- Stable device matching via ID/UUID/MAC, also across renames
+- No token output in logs or UI (tokens are stored encrypted)
 
-## Konfiguration
-In der Admin-Oberfläche:
-- **Auto Scan**: periodische Discovery
-- **Auto Scan Interval (s)**: Intervall für automatische Discovery
-- **Discovery Timeout (s)**: Timeout für Scan
-- **Enable SSDP** / **Enable mDNS**: Discovery-Quellen
-- **mDNS Services**: Komma-getrennte Service-Typen (best effort)
-- **Enable Wake-on-LAN**: WOL aktivieren
-- **Power Poll Interval (s)**: Intervall für Power-Check
+## Configuration
+In the admin UI:
+- **Auto Scan**: periodic discovery
+- **Auto Scan Interval (s)**: interval for automatic discovery
+- **Discovery Timeout (s)**: scan timeout
+- **Enable SSDP** / **Enable mDNS**: discovery sources
+- **mDNS Services**: comma-separated service types (best effort)
+- **Enable Wake-on-LAN**: enable WOL
+- **Power Poll Interval (s)**: interval for power checks
 
-### Geräte hinzufügen
-1. **Scan** starten.
-2. Gefundenes TV-Gerät per **Add** hinzufügen.
-3. Optional Name/IP anpassen.
-4. **Speichern**.
+### Add devices
+1. Start **Scan**.
+2. Add a discovered TV via **Add**.
+3. Optionally adjust name/IP.
+4. **Save**.
 
 ### Pairing
-- **Tizen**: Bei **Pair** erscheint ein Hinweis am TV (meist **Zulassen/Abbrechen**, kein PIN). Bestätigen, dann speichern.
-- **H/J-Serie**: **Pair** klicken → TV zeigt PIN → PIN eingeben → speichern.
+- **Tizen**: when you click **Pair**, the TV shows a prompt (usually **Allow/Cancel**, no PIN). Confirm, then save.
+- **H/J series**: click **Pair** → TV shows PIN → enter PIN → save.
 
-Token/Identitäten werden verschlüsselt im Adapter-Config gespeichert.
+Tokens/identities are stored encrypted in the adapter config.
 
-Falls beim Pairing **kein Hinweis** erscheint:
-- TV: **Geräte-Verbindungsmanager / Device Connection Manager** → **Zugriffsbenachrichtigung** aktivieren.
-- TV: **Geräteliste** prüfen und alte Einträge entfernen.
-- ioBroker und TV im **gleichen Subnetz** betreiben.
+If **no prompt** appears during pairing:
+- TV: **Device Connection Manager** → enable **Access Notification**.
+- TV: check **Device List** and remove old entries.
+- Make sure ioBroker and the TV are on the **same subnet**.
 
-## Objektmodell
-Pro TV:
+## Object model
+Per TV:
 - `samsungtv.0.<tvname>.info.*`
   - `id`, `ip`, `mac`, `model`, `uuid`, `api`, `lastSeen`, `paired`, `online`
-  - `tokenAuthSupport`, `remoteAvailable` (falls vom TV gemeldet)
+  - `tokenAuthSupport`, `remoteAvailable` (if reported by the TV)
 - `samsungtv.0.<tvname>.state.*`
   - `power`, `volume`, `muted`, `app`, `source`
 - `samsungtv.0.<tvname>.control.*`
   - `power`, `wol`, `key`, `volumeUp`, `volumeDown`, `mute`, `channelUp`, `channelDown`, `launchApp`, `source`
 
-### Steuerung (Kurz)
-- `control.key`: beliebiger Remote-Key (z.B. `KEY_POWER`, `KEY_VOLUP`)
-- `control.launchApp`: App-ID (Tizen) aus der TV-App-Liste
-- `control.source`: Quelle als Key (`KEY_HDMI`, `KEY_SOURCE`) oder Kurzform (`HDMI`)
+### Control (short)
+- `control.key`: any remote key (e.g. `KEY_POWER`, `KEY_VOLUP`)
+- `control.launchApp`: app ID (Tizen) from the TV app list
+- `control.source`: source as key (`KEY_HDMI`, `KEY_SOURCE`) or short form (`HDMI`)
 
-### Key-Codes (control.key)
-`control.key` akzeptiert entweder **Samsung Key-Codes** (`KEY_*`) oder **freundliche Kurzformen**:
+### Key codes (control.key)
+`control.key` accepts either **Samsung key codes** (`KEY_*`) or **friendly short forms**:
 - Navigation: `up`, `down`, `left`, `right`, `enter`, `back`
 - System: `home`, `source`, `menu`, `info`, `guide`, `exit`
-- Lautstärke/Kanal: `volup`, `voldown`, `mute`, `chup`, `chdown`
+- Volume/channel: `volup`, `voldown`, `mute`, `chup`, `chdown`
 - Media: `play`, `pause`, `stop`, `rewind`, `ff`, `record`
-- Farben: `red`, `green`, `yellow`, `blue`
-- Ziffern: `0` bis `9`
+- Colors: `red`, `green`, `yellow`, `blue`
+- Numbers: `0` to `9`
 
-Direkte Key-Codes funktionieren ebenfalls:
-- Beispiele: `KEY_UP`, `KEY_DOWN`, `KEY_ENTER`, `KEY_RETURN`, `KEY_HOME`, `KEY_SOURCE`
+Direct key codes also work:
+- Examples: `KEY_UP`, `KEY_DOWN`, `KEY_ENTER`, `KEY_RETURN`, `KEY_HOME`, `KEY_SOURCE`
 
-Hinweis: Nicht jeder TV unterstützt jeden Key. Manche Keys wirken nur, wenn ein Menü/Fokus aktiv ist.
+Note: not every TV supports every key. Some keys only work when a menu/focus is active.
 
-## Hinweise
-- Discovery ist best effort. SSDP ist primär, mDNS optional.
-- Ältere Geräte werden nach Möglichkeit erkannt (HJ/Legacy), Feature-Umfang kann variieren.
-- Bei H/J/JU-Geräten wird HJ bevorzugt, wenn verfügbar. Tizen-Remote wird ansonsten versucht und bei „unrecognized method“ automatisch auf HJ umgestellt.
-- Falls Legacy-Objekte existieren, werden Warnungen im Log ausgegeben.
-- Adapter wurde auf `samsungtv` umbenannt, um Konflikte mit dem alten `samsung`-Adapter zu vermeiden.
-- Bei Installation über URL wird eine Instanz automatisch angelegt. (Überspringen mit `IOBROKER_SKIP_POSTINSTALL=1`)
+## Notes
+- Discovery is best effort. SSDP is primary, mDNS is optional.
+- Older devices are detected where possible (HJ/Legacy); feature set may vary.
+- For H/J/JU devices, HJ is preferred when available. Tizen remote is attempted otherwise and switches to HJ automatically if the TV reports "unrecognized method".
+- If legacy objects exist, warnings are logged.
+- Adapter is renamed to `samsungtv` to avoid conflicts with the old `samsung` adapter.
+- When installing via URL, an instance is created automatically (skip with `IOBROKER_SKIP_POSTINSTALL=1`).
 
-## How to test (Kurz)
-1. Adapter installieren und Instanz anlegen.
-2. Admin öffnen, **Scan** starten.
-3. TV hinzufügen und Namen (z.B. `tv-wohnzimmer`) setzen.
-4. **Speichern**. Prüfen, ob Objektbaum `samsungtv.0.tv-wohnzimmer.*` erscheint.
-5. **Pair** ausführen und am TV bestätigen.
-6. In den Objekten `control.*` testen (z.B. `control.mute`).
-7. TV umbenennen und erneut speichern: Objektbaum soll sauber migriert werden.
+## How to test (short)
+1. Install the adapter and create an instance.
+2. Open admin, start **Scan**.
+3. Add a TV and set a name (e.g. `tv-livingroom`).
+4. **Save**. Verify object tree `samsungtv.0.tv-livingroom.*`.
+5. Run **Pair** and confirm on the TV.
+6. Test `control.*` objects (e.g. `control.mute`).
+7. Rename the TV and save again: object tree should migrate cleanly.
 
-## Lizenz
+## License
 MIT
