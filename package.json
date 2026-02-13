@@ -4,7 +4,7 @@
   "description": "Modern Samsung TV adapter with discovery and multi-device support",
   "author": "softwarecrash",
   "contributors": [],
-  "homepage": "https://github.com/softwarecrash/iobroker.samsungtv",
+  "homepage": "https://github.com/softwarecrash/ioBroker.samsungtv",
   "license": "MIT",
   "keywords": [
     "ioBroker",
@@ -18,7 +18,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/softwarecrash/iobroker.samsungtv.git"
+    "url": "https://github.com/softwarecrash/ioBroker.samsungtv.git"
   },
   "engines": {
     "node": ">=20"
