@@ -1,5 +1,5 @@
-const path = require("path");
-const { tests } = require("@iobroker/testing");
+const path = require('path');
+const { tests } = require('@iobroker/testing');
 
 // Run integration tests - See https://github.com/ioBroker/testing for details
-tests.integration(path.join(__dirname, ".."));
+tests.integration(path.join(__dirname, '..'));

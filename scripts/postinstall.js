@@ -1,8 +1,8 @@
-"use strict";
+'use strict';
 
-const fs = require("fs");
-const path = require("path");
-const { execFileSync } = require("child_process");
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
 
 function fileExists(p) {
     try {
@@ -17,17 +17,17 @@ function findIoBrokerCommand() {
     const candidates = [];
 
     if (envHome) {
-        candidates.push(path.join(envHome, "iobroker"));
-        candidates.push(path.join(envHome, "node_modules", "iobroker.js-controller", "iobroker.js"));
+        candidates.push(path.join(envHome, 'iobroker'));
+        candidates.push(path.join(envHome, 'node_modules', 'iobroker.js-controller', 'iobroker.js'));
     }
 
-    candidates.push("/opt/iobroker/iobroker");
-    candidates.push("/usr/local/bin/iobroker");
-    candidates.push("/usr/bin/iobroker");
+    candidates.push('/opt/iobroker/iobroker');
+    candidates.push('/usr/local/bin/iobroker');
+    candidates.push('/usr/bin/iobroker');
 
     for (const candidate of candidates) {
         if (fileExists(candidate)) {
-            if (candidate.endsWith(".js")) {
+            if (candidate.endsWith('.js')) {
                 return { cmd: process.execPath, args: [candidate] };
             }
             return { cmd: candidate, args: [] };
@@ -36,12 +36,12 @@ function findIoBrokerCommand() {
 
     let dir = __dirname;
     for (let i = 0; i < 8; i++) {
-        const shellCandidate = path.join(dir, "iobroker");
+        const shellCandidate = path.join(dir, 'iobroker');
         if (fileExists(shellCandidate)) {
             return { cmd: shellCandidate, args: [] };
         }
 
-        const jsCandidate = path.join(dir, "node_modules", "iobroker.js-controller", "iobroker.js");
+        const jsCandidate = path.join(dir, 'node_modules', 'iobroker.js-controller', 'iobroker.js');
         if (fileExists(jsCandidate)) {
             return { cmd: process.execPath, args: [jsCandidate] };
         }
@@ -53,17 +53,17 @@ function findIoBrokerCommand() {
         dir = parent;
     }
 
-    return { cmd: "iobroker", args: [] };
+    return { cmd: 'iobroker', args: [] };
 }
 
 function execIoBroker(args) {
     const cmd = findIoBrokerCommand();
-    execFileSync(cmd.cmd, [...cmd.args, ...args], { stdio: "ignore" });
+    execFileSync(cmd.cmd, [...cmd.args, ...args], { stdio: 'ignore' });
 }
 
 function hasInstance() {
     try {
-        execIoBroker(["object", "get", "system.adapter.samsungtv.0"]);
+        execIoBroker(['object', 'get', 'system.adapter.samsungtv.0']);
         return true;
     } catch (e) {
         return false;
@@ -72,7 +72,7 @@ function hasInstance() {
 
 function addInstance() {
     try {
-        execIoBroker(["add", "samsungtv"]);
+        execIoBroker(['add', 'samsungtv']);
     } catch (e) {
         // ignore if already exists or not possible in this environment
     }
