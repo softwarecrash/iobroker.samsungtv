@@ -1,6 +1,6 @@
 ![Logo](admin/samsung.svg)
 
-# ioBroker.samsungtv
+# iobroker.samsungtv
 
 Modern Samsung TV adapter with automatic discovery and multi-device management in one instance (multiple TVs supported in the same instance).
 

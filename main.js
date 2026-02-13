@@ -1367,7 +1367,7 @@ function buildTizenWsOptions(url) {
             perMessageDeflate: false,
             headers: {
                 Origin: origin,
-                'User-Agent': 'ioBroker.samsungtv',
+                'User-Agent': 'iobroker.samsungtv',
             },
         };
     } catch (e) {

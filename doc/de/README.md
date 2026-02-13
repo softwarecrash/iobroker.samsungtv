@@ -1,6 +1,6 @@
 ![Logo](../../admin/samsung.svg)
 
-# ioBroker.samsungtv
+# iobroker.samsungtv
 
 Moderner Samsung-TV-Adapter mit automatischer Discovery und Multi-Device-Management in einer einzigen Instanz.
 
