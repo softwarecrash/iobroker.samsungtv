@@ -44,7 +44,7 @@ Falls beim Pairing **kein Hinweis** erscheint:
 Pro TV:
 - `samsungtv.0.<tvname>.info.*`
   - `id`, `ip`, `mac`, `model`, `uuid`, `api`, `lastSeen`, `paired`, `online`
-  - `tokenAuthSupport`, `remoteAvailable` (falls vom TV gemeldet)
+  - `tokenAuthSupport`
 - `samsungtv.0.<tvname>.state.*`
   - `power`, `volume`, `muted`, `app`, `source`
 - `samsungtv.0.<tvname>.control.*`

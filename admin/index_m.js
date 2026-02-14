@@ -339,7 +339,6 @@ function addDeviceFromDiscovery(d) {
         source: d.source || '',
         hjAvailable: typeof d.hjAvailable === 'boolean' ? d.hjAvailable : undefined,
         tokenAuthSupport: typeof d.tokenAuthSupport === 'boolean' ? d.tokenAuthSupport : undefined,
-        remoteAvailable: typeof d.remoteAvailable === 'boolean' ? d.remoteAvailable : undefined,
     });
 
     onChangeCb && onChangeCb();

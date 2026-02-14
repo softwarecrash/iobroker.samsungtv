@@ -46,7 +46,7 @@ If **no prompt** appears during pairing:
 Per TV:
 - `samsungtv.0.<tvname>.info.*`
   - `id`, `ip`, `mac`, `model`, `uuid`, `api`, `lastSeen`, `paired`, `online`
-  - `tokenAuthSupport`, `remoteAvailable` (if reported by the TV)
+  - `tokenAuthSupport`
 - `samsungtv.0.<tvname>.state.*`
   - `power`, `volume`, `muted`, `app`, `source`
 - `samsungtv.0.<tvname>.control.*`

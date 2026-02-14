@@ -7,8 +7,11 @@ const WebSocket = require('ws');
 const wol = require('wake_on_lan');
 const fetch = require('node-fetch');
 const https = require('https');
+const http = require('http');
 const net = require('net');
 const { execFile } = require('child_process');
+const os = require('os');
+const dgram = require('dgram');
 const { XMLParser } = require('fast-xml-parser');
 const LegacyRemote = require('./lib/legacy/LegacyRemote');
 const SamsungHJ = require('./lib/hj/SamsungTv');
@@ -40,6 +43,10 @@ let pingUnavailable = false;
 let pollTimer;
 let scanTimer;
 let configSaveTimer;
+let upnpNotifyServer;
+let upnpNotifyPort = 0;
+let upnpSubscriptionsByDeviceId = new Map(); // deviceId -> { sid, eventUrl, renewTimer, expiresAt }
+let upnpSidToDeviceId = new Map(); // sid -> deviceId
 
 function createAdapter() {
     return new utils.Adapter({
@@ -65,6 +72,8 @@ async function onUnload(callback) {
             clearTimeout(configSaveTimer);
             configSaveTimer = null;
         }
+        cleanupUpnpSubscriptions();
+        stopUpnpNotifyServer();
         callback();
     } catch (e) {
         callback();
@@ -176,9 +185,8 @@ async function migrateLegacyConfigFromSamsung() {
     }
 }
 
-function getTizenToken(deviceId) {
-    const token = (tokens.tizen && tokens.tizen[deviceId]) || '';
-    return token === NO_TOKEN ? '' : token;
+function getTizenTokenRaw(deviceId) {
+    return (tokens.tizen && tokens.tizen[deviceId]) || '';
 }
 
 function getHjIdentity(deviceId) {
@@ -252,8 +260,9 @@ function getConfiguredDevices() {
             port: raw.port || 0,
             uuid: raw.uuid || '',
             source: raw.source || 'config',
+            renderingControlUrl: raw.renderingControlUrl || '',
+            renderingControlEventUrl: raw.renderingControlEventUrl || '',
             tokenAuthSupport: typeof raw.tokenAuthSupport === 'boolean' ? raw.tokenAuthSupport : undefined,
-            remoteAvailable: typeof raw.remoteAvailable === 'boolean' ? raw.remoteAvailable : undefined,
             hjAvailable: typeof raw.hjAvailable === 'boolean' ? raw.hjAvailable : undefined,
         };
         result.push(device);
@@ -326,16 +335,20 @@ function updateConfigDeviceFromDiscovery(match, info) {
             dev.port = info.port;
             updated = true;
         }
+        if (info.renderingControlUrl && dev.renderingControlUrl !== info.renderingControlUrl) {
+            dev.renderingControlUrl = info.renderingControlUrl;
+            updated = true;
+        }
+        if (info.renderingControlEventUrl && dev.renderingControlEventUrl !== info.renderingControlEventUrl) {
+            dev.renderingControlEventUrl = info.renderingControlEventUrl;
+            updated = true;
+        }
         if (typeof info.hjAvailable === 'boolean' && dev.hjAvailable !== info.hjAvailable) {
             dev.hjAvailable = info.hjAvailable;
             updated = true;
         }
         if (typeof info.tokenAuthSupport === 'boolean' && dev.tokenAuthSupport !== info.tokenAuthSupport) {
             dev.tokenAuthSupport = info.tokenAuthSupport;
-            updated = true;
-        }
-        if (typeof info.remoteAvailable === 'boolean' && dev.remoteAvailable !== info.remoteAvailable) {
-            dev.remoteAvailable = info.remoteAvailable;
             updated = true;
         }
     }
@@ -554,8 +567,8 @@ async function ensureDeviceObjects(device) {
     await ensureState(`${base}.info.paired`, 'Paired', 'boolean', 'indicator', false, true);
     await ensureState(`${base}.info.online`, 'Online', 'boolean', 'indicator.reachable', false, true);
     await ensureState(`${base}.info.tokenAuthSupport`, 'Token Auth Support', 'boolean', 'indicator', false, true);
-    await ensureState(`${base}.info.remoteAvailable`, 'Remote Available', 'boolean', 'indicator', false, true);
-    await ensureState(`${base}.info.hjAvailable`, 'HJ Available', 'boolean', 'indicator', false, true);
+    await removeStateIfExists(`${base}.info.remoteAvailable`);
+    await removeStateIfExists(`${base}.info.hjAvailable`);
 
     await ensureState(`${base}.state.power`, 'Power', 'boolean', 'indicator.power', false, true);
     await ensureState(`${base}.state.volume`, 'Volume', 'number', 'value.volume', 0, true);
@@ -589,7 +602,27 @@ async function ensureState(id, name, type, role, def, readOnly) {
         native: {},
     });
     if (def !== undefined) {
-        await adapter.setStateAsync(id, def, true);
+        const existing = await adapter.getStateAsync(id);
+        if (existing === null || existing === undefined) {
+            await adapter.setStateAsync(id, def, true);
+        }
+    }
+}
+
+async function removeStateIfExists(id) {
+    try {
+        const obj = await adapter.getObjectAsync(id);
+        if (!obj) {
+            return;
+        }
+        try {
+            await adapter.delStateAsync(id);
+        } catch (e) {
+            // ignore
+        }
+        await adapter.delObjectAsync(id);
+    } catch (e) {
+        // ignore
     }
 }
 
@@ -641,12 +674,6 @@ async function updateDeviceInfoStates(device) {
     if (typeof device.tokenAuthSupport === 'boolean') {
         await adapter.setStateAsync(`${base}.info.tokenAuthSupport`, device.tokenAuthSupport, true);
     }
-    if (typeof device.remoteAvailable === 'boolean') {
-        await adapter.setStateAsync(`${base}.info.remoteAvailable`, device.remoteAvailable, true);
-    }
-    if (typeof device.hjAvailable === 'boolean') {
-        await adapter.setStateAsync(`${base}.info.hjAvailable`, device.hjAvailable, true);
-    }
 }
 
 function isDevicePaired(device) {
@@ -675,12 +702,117 @@ async function pollDevices() {
 async function pollDevice(device) {
     try {
         const status = await checkDeviceStatus(device);
+        const audio = resolveAudioStates(device, status);
         await adapter.setStateAsync(`${device.name}.info.online`, status.online, true);
         await adapter.setStateAsync(`${device.name}.state.power`, status.power, true);
         await adapter.setStateAsync(`${device.name}.control.power`, status.power, true);
+        await adapter.setStateAsync(`${device.name}.state.volume`, audio.volume, true);
+        await adapter.setStateAsync(`${device.name}.state.muted`, audio.muted, true);
+
+        if (status.online) {
+            ensureUpnpEventSubscription(device).catch(e =>
+                adapter.log.debug(`UPnP subscribe failed for ${device.name}: ${e.message}`),
+            );
+        }
     } catch (e) {
         // ignore
     }
+}
+
+function resolveAudioStates(device, status) {
+    if (!device || !status || typeof status !== 'object') {
+        return { volume: null, muted: null };
+    }
+    const now = Date.now();
+    const previousVolume = typeof device.lastKnownVolume === 'number' ? device.lastKnownVolume : null;
+    let volume = typeof status.volume === 'number' && Number.isFinite(status.volume) ? status.volume : null;
+    let muted = typeof status.muted === 'boolean' ? status.muted : null;
+
+    if (typeof device.expectedVolumeUntil === 'number' && now >= device.expectedVolumeUntil) {
+        delete device.expectedVolume;
+        delete device.expectedVolumeUntil;
+    }
+
+    if (status.volumeSource === 'upnp' && typeof volume === 'number') {
+        if (
+            typeof device.expectedVolume === 'number' &&
+            typeof device.expectedVolumeUntil === 'number' &&
+            now < device.expectedVolumeUntil
+        ) {
+            if (volume === device.expectedVolume) {
+                device.volumeTelemetryReliable = true;
+            } else {
+                device.volumeTelemetryReliable = false;
+            }
+        }
+        if (volume > 0) {
+            // Seeing a non-zero value is a strong sign that telemetry is usable.
+            device.volumeTelemetryReliable = true;
+        }
+    }
+
+    if (status.volumeSource === 'upnp' && device.volumeTelemetryReliable === false) {
+        // Do not override with known-bad telemetry.
+        volume = previousVolume;
+    } else if (status.volumeSource === 'upnp' && device.api === 'tizen' && device.volumeTelemetryReliable !== true) {
+        // Many Tizen models report 0 via UPnP even though volume is not 0.
+        if (volume === 0) {
+            volume = previousVolume;
+        }
+    }
+
+    if (volume !== null) {
+        device.lastKnownVolume = volume;
+    }
+
+    if (typeof device.expectedMutedUntil === 'number' && now >= device.expectedMutedUntil) {
+        delete device.expectedMuted;
+        delete device.expectedMutedUntil;
+    }
+
+    if (status.mutedSource === 'upnp' && typeof muted === 'boolean') {
+        if (
+            typeof device.expectedMuted === 'boolean' &&
+            typeof device.expectedMutedUntil === 'number' &&
+            now < device.expectedMutedUntil
+        ) {
+            if (muted === device.expectedMuted) {
+                device.mutedTelemetryReliable = true;
+            } else {
+                device.mutedTelemetryReliable = false;
+            }
+        }
+
+        if (muted === true) {
+            // Seeing "true" at least once is a strong sign that telemetry is usable for this model.
+            device.mutedTelemetryReliable = true;
+        }
+    }
+
+    if (status.mutedSource === 'upnp' && device.mutedTelemetryReliable === false) {
+        // Do not override with known-bad telemetry.
+        muted = typeof device.lastKnownMuted === 'boolean' ? device.lastKnownMuted : null;
+    }
+
+    if (status.mutedSource === 'upnp' && device.api === 'tizen' && device.mutedTelemetryReliable !== true) {
+        // Many Tizen models never report mute=true via UPnP. Treat mute=false as unknown unless proven reliable.
+        if (muted === false) {
+            muted = typeof device.lastKnownMuted === 'boolean' ? device.lastKnownMuted : null;
+        }
+    }
+
+    if (status.mutedSource === 'upnp' && muted === false && device.lastKnownMuted === true) {
+        const holdUntil = device.mutedShadowUntil || 0;
+        if (now < holdUntil) {
+            muted = true;
+        }
+    }
+
+    if (muted !== null) {
+        device.lastKnownMuted = muted;
+    }
+
+    return { volume, muted };
 }
 
 function scheduleDevicePoll(device, delayMs) {
@@ -726,11 +858,119 @@ function interpretPowerState(value) {
     return null;
 }
 
+function extractVolumeValue(info) {
+    if (!info || typeof info !== 'object') {
+        return null;
+    }
+    const device = info.device || info || {};
+    const candidates = [
+        device.volume,
+        device.Volume,
+        device.currentVolume,
+        device.CurrentVolume,
+        info.volume,
+        info.Volume,
+        info.currentVolume,
+        info.CurrentVolume,
+    ];
+    for (const value of candidates) {
+        const parsed = parseInt(value, 10);
+        if (!Number.isNaN(parsed)) {
+            return Math.max(0, Math.min(100, parsed));
+        }
+    }
+    return null;
+}
+
+function normalizeMutedValue(value) {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+    if (typeof value === 'number') {
+        return value !== 0;
+    }
+    if (typeof value === 'string') {
+        const v = value.trim().toLowerCase();
+        if (['1', 'true', 'on', 'yes', 'muted'].includes(v)) {
+            return true;
+        }
+        if (['0', 'false', 'off', 'no', 'unmuted'].includes(v)) {
+            return false;
+        }
+    }
+    return null;
+}
+
+function extractMutedValue(info) {
+    if (!info || typeof info !== 'object') {
+        return null;
+    }
+    const device = info.device || info || {};
+    const candidates = [
+        device.mute,
+        device.Mute,
+        device.muted,
+        device.Muted,
+        device.currentMute,
+        device.CurrentMute,
+        info.mute,
+        info.Mute,
+        info.muted,
+        info.Muted,
+        info.currentMute,
+        info.CurrentMute,
+    ];
+    for (const value of candidates) {
+        const normalized = normalizeMutedValue(value);
+        if (typeof normalized === 'boolean') {
+            return normalized;
+        }
+    }
+    return null;
+}
+
+function applyAudioFieldsFromInfo(info, status) {
+    if (!status || typeof status !== 'object') {
+        return;
+    }
+    const volume = extractVolumeValue(info);
+    if (typeof volume === 'number') {
+        status.volume = volume;
+        status.volumeSource = 'api';
+    }
+    const muted = extractMutedValue(info);
+    if (typeof muted === 'boolean') {
+        status.muted = muted;
+        status.mutedSource = 'api';
+    }
+}
+
+async function enrichAudioStatus(device, status) {
+    if (!status || !status.online) {
+        return;
+    }
+    if (typeof status.volume === 'number' && typeof status.muted === 'boolean') {
+        return;
+    }
+    const upnpAudio = await readUpnpAudioStatus(device);
+    if (!upnpAudio) {
+        return;
+    }
+    if (typeof status.volume !== 'number' && typeof upnpAudio.volume === 'number') {
+        status.volume = upnpAudio.volume;
+        status.volumeSource = 'upnp';
+    }
+    if (typeof status.muted !== 'boolean' && typeof upnpAudio.muted === 'boolean') {
+        status.muted = upnpAudio.muted;
+        status.mutedSource = 'upnp';
+    }
+}
+
 async function checkDeviceStatus(device) {
     if (!device.ip) {
         await refreshIpFromMac(device);
         if (!device.ip) {
-            return { online: false, power: false };
+            return { online: false, power: false, volume: null, muted: null };
         }
     }
 
@@ -746,7 +986,7 @@ async function checkDeviceStatus(device) {
 
 async function checkDeviceStatusWithIp(device) {
     if (!device.ip) {
-        return { online: false, power: false };
+        return { online: false, power: false, volume: null, muted: null };
     }
 
     if (device.api === 'tizen') {
@@ -754,6 +994,8 @@ async function checkDeviceStatusWithIp(device) {
         if (info) {
             const powerState = extractPowerState(info);
             const power = interpretPowerState(powerState);
+            const status = { online: true, power: power === null ? true : power, volume: null, muted: null };
+            applyAudioFieldsFromInfo(info, status);
             if (!device.mac) {
                 const mac = normalizeMac(info?.device?.wifiMac || info?.device?.mac || '');
                 if (mac) {
@@ -763,13 +1005,16 @@ async function checkDeviceStatusWithIp(device) {
                 }
             }
             markSeen(device);
-            return { online: true, power: power === null ? true : power };
+            await enrichAudioStatus(device, status);
+            return status;
         }
         // fallback to 8001
         const info2 = await fetchTizenInfo(device.ip, 'ws', 8001, 1500);
         if (info2) {
             const powerState = extractPowerState(info2);
             const power = interpretPowerState(powerState);
+            const status = { online: true, power: power === null ? true : power, volume: null, muted: null };
+            applyAudioFieldsFromInfo(info2, status);
             if (!device.mac) {
                 const mac = normalizeMac(info2?.device?.wifiMac || info2?.device?.mac || '');
                 if (mac) {
@@ -779,41 +1024,53 @@ async function checkDeviceStatusWithIp(device) {
                 }
             }
             markSeen(device);
-            return { online: true, power: power === null ? true : power };
+            await enrichAudioStatus(device, status);
+            return status;
         }
     } else if (device.api === 'hj') {
         const info = await fetchHjInfo(device.ip, 1500);
         if (info) {
             const powerState = extractPowerState(info);
             const power = interpretPowerState(powerState);
+            const status = { online: true, power: power === null ? true : power, volume: null, muted: null };
+            applyAudioFieldsFromInfo(info, status);
             markSeen(device);
-            return { online: true, power: power === null ? true : power };
+            await enrichAudioStatus(device, status);
+            return status;
         }
         const pingOk = await pingHost(device.ip, 1200);
         if (pingOk === true) {
+            const status = { online: true, power: false, volume: null, muted: null };
             markSeen(device);
-            return { online: true, power: false };
+            await enrichAudioStatus(device, status);
+            return status;
         }
         const ok = await checkPort(device.ip, 8000, 1000);
         if (ok) {
+            const status = { online: true, power: false, volume: null, muted: null };
             markSeen(device);
-            return { online: true, power: false };
+            await enrichAudioStatus(device, status);
+            return status;
         }
     } else if (device.api === 'legacy') {
         const ok = await checkPort(device.ip, 55000, 1500);
         if (ok) {
+            const status = { online: true, power: true, volume: null, muted: null };
             markSeen(device);
-            return { online: true, power: true };
+            await enrichAudioStatus(device, status);
+            return status;
         }
     }
 
     // generic fallback: ping port 8001
     const okGeneric = await checkPort(device.ip, 8001, 1000);
     if (okGeneric) {
+        const status = { online: true, power: true, volume: null, muted: null };
         markSeen(device);
-        return { online: true, power: true };
+        await enrichAudioStatus(device, status);
+        return status;
     }
-    return { online: false, power: false };
+    return { online: false, power: false, volume: null, muted: null };
 }
 
 function markSeen(device) {
@@ -875,11 +1132,11 @@ async function handleControl(device, id, command, value) {
             }
             return;
         case 'volumeUp':
-            return sendButton(device, id, 'KEY_VOLUP', value);
+            return sendVolumeStep(device, id, 'KEY_VOLUP', 1, value);
         case 'volumeDown':
-            return sendButton(device, id, 'KEY_VOLDOWN', value);
+            return sendVolumeStep(device, id, 'KEY_VOLDOWN', -1, value);
         case 'mute':
-            return sendButton(device, id, 'KEY_MUTE', value);
+            return sendMuteToggle(device, id, value);
         case 'channelUp':
             return sendButton(device, id, 'KEY_CHUP', value);
         case 'channelDown':
@@ -909,6 +1166,54 @@ async function sendButton(device, id, key, value) {
         await sendKey(device, key);
         await adapter.setStateAsync(id, false, true);
     }
+}
+
+async function sendVolumeStep(device, id, key, delta, value) {
+    if (!isTruthyValue(value)) {
+        return;
+    }
+    await sendKey(device, key);
+    await adapter.setStateAsync(id, false, true);
+
+    const state = await adapter.getStateAsync(`${device.name}.state.volume`);
+    const current =
+        state && typeof state.val === 'number' && Number.isFinite(state.val)
+            ? state.val
+            : typeof device.lastKnownVolume === 'number'
+              ? device.lastKnownVolume
+              : null;
+    if (current !== null) {
+        const next = Math.max(0, Math.min(100, current + delta));
+        device.lastKnownVolume = next;
+        device.expectedVolume = next;
+        device.expectedVolumeUntil = Date.now() + 12000;
+        await adapter.setStateAsync(`${device.name}.state.volume`, next, true);
+    }
+    scheduleDevicePoll(device, 1200);
+}
+
+async function sendMuteToggle(device, id, value) {
+    if (!isTruthyValue(value)) {
+        return;
+    }
+    await sendKey(device, 'KEY_MUTE');
+    await adapter.setStateAsync(id, false, true);
+
+    const state = await adapter.getStateAsync(`${device.name}.state.muted`);
+    const current =
+        state && typeof state.val === 'boolean'
+            ? state.val
+            : typeof device.lastKnownMuted === 'boolean'
+              ? device.lastKnownMuted
+              : false;
+    const next = !current;
+    device.lastKnownMuted = next;
+    device.expectedMuted = next;
+    device.expectedMutedUntil = Date.now() + 12000;
+    // Keep optimistic mute result for a short period, because some TVs always report false via UPnP.
+    device.mutedShadowUntil = Date.now() + 120000;
+    await adapter.setStateAsync(`${device.name}.state.muted`, next, true);
+    scheduleDevicePoll(device, 1200);
 }
 
 function isTruthyValue(val) {
@@ -1241,7 +1546,11 @@ async function tizenSendKey(device, key) {
 }
 
 async function tizenSend(device, payload) {
-    const token = getTizenToken(device.id);
+    const tokenRaw = getTizenTokenRaw(device.id);
+    const token = tokenRaw === NO_TOKEN ? '' : tokenRaw;
+    if (device.tokenAuthSupport === true && !token) {
+        throw new Error('Not paired (Tizen)');
+    }
     const urlCandidates = buildTizenWsCandidates(device, token, ['v2', 'v3']);
     let lastError;
     for (const url of urlCandidates) {
@@ -1652,11 +1961,10 @@ async function performDiscovery(updateKnownDevices, timeoutOverride) {
                     match.api = info.api || match.api;
                     match.protocol = info.protocol || match.protocol;
                     match.port = info.port || match.port;
+                    match.renderingControlUrl = info.renderingControlUrl || match.renderingControlUrl;
+                    match.renderingControlEventUrl = info.renderingControlEventUrl || match.renderingControlEventUrl;
                     if (typeof info.tokenAuthSupport === 'boolean') {
                         match.tokenAuthSupport = info.tokenAuthSupport;
-                    }
-                    if (typeof info.remoteAvailable === 'boolean') {
-                        match.remoteAvailable = info.remoteAvailable;
                     }
                     if (typeof info.hjAvailable === 'boolean') {
                         match.hjAvailable = info.hjAvailable;
@@ -1782,24 +2090,6 @@ function parseTokenAuthSupport(info) {
     return undefined;
 }
 
-function parseIsSupport(info) {
-    const raw = info?.isSupport;
-    if (!raw) {
-        return {};
-    }
-    if (typeof raw === 'object') {
-        return raw;
-    }
-    if (typeof raw === 'string') {
-        try {
-            return JSON.parse(raw);
-        } catch (e) {
-            return {};
-        }
-    }
-    return {};
-}
-
 function isLikelyHjSeries(result) {
     const modelName = (result.model || '').toUpperCase();
     const code = (result.uuid || '').toUpperCase();
@@ -1841,6 +2131,8 @@ async function probeDevice(ip, seed) {
         uuid: '',
         id: '',
         mac: '',
+        renderingControlUrl: seed.renderingControlUrl || '',
+        renderingControlEventUrl: seed.renderingControlEventUrl || '',
     };
 
     // try tizen https
@@ -1884,6 +2176,12 @@ async function probeDevice(ip, seed) {
             }
             if (!result.uuid && desc.UDN) {
                 result.uuid = desc.UDN;
+            }
+            if (!result.renderingControlUrl && desc.renderingControlUrl) {
+                result.renderingControlUrl = desc.renderingControlUrl;
+            }
+            if (!result.renderingControlEventUrl && desc.renderingControlEventUrl) {
+                result.renderingControlEventUrl = desc.renderingControlEventUrl;
             }
             adapter.log.debug(`UPnP description for ${ip}: model=${result.model || '-'} name=${result.name || '-'}`);
         }
@@ -1955,10 +2253,6 @@ function applyTizenInfo(result, info) {
     if (typeof tokenAuthSupport === 'boolean') {
         result.tokenAuthSupport = tokenAuthSupport;
     }
-    const isSupport = parseIsSupport(info);
-    if (typeof isSupport.remote_available === 'boolean') {
-        result.remoteAvailable = isSupport.remote_available;
-    }
 }
 
 async function fetchTizenInfo(ip, protocol, port, timeoutMs) {
@@ -2012,12 +2306,598 @@ async function fetchUpnpDescription(url, timeoutMs) {
         const text = await resp.text();
         const xml = xmlParser.parse(text);
         const device = xml?.root?.device || xml?.device || {};
+        const serviceList = device?.serviceList?.service;
+        const services = Array.isArray(serviceList) ? serviceList : serviceList ? [serviceList] : [];
+        let renderingControlUrl = '';
+        let renderingControlEventUrl = '';
+        for (const svc of services) {
+            const st = (svc?.serviceType || '').toString();
+            if (!/RenderingControl/i.test(st)) {
+                continue;
+            }
+            renderingControlUrl = buildAbsoluteUrl(url, svc?.controlURL || '');
+            renderingControlEventUrl = buildAbsoluteUrl(url, svc?.eventSubURL || '');
+            if (renderingControlUrl) {
+                break;
+            }
+        }
         return {
             friendlyName: device.friendlyName,
             manufacturer: device.manufacturer,
             modelName: device.modelName,
             UDN: normalizeId(device.UDN || ''),
+            renderingControlUrl,
+            renderingControlEventUrl,
         };
+    } catch (e) {
+        return null;
+    }
+}
+
+function buildAbsoluteUrl(baseUrl, pathOrUrl) {
+    if (!pathOrUrl) {
+        return '';
+    }
+    try {
+        return new URL(pathOrUrl, baseUrl).href;
+    } catch (e) {
+        return '';
+    }
+}
+
+async function readUpnpAudioStatus(device) {
+    if (!device || !device.ip) {
+        return null;
+    }
+    const controlUrl = await getRenderingControlUrl(device);
+    if (!controlUrl) {
+        return null;
+    }
+
+    const [volume, muted] = await Promise.all([
+        upnpGetRenderingControlValue(controlUrl, 'GetVolume', 'CurrentVolume'),
+        upnpGetRenderingControlValue(controlUrl, 'GetMute', 'CurrentMute'),
+    ]);
+
+    if (volume === null && muted === null) {
+        return null;
+    }
+
+    return {
+        volume: typeof volume === 'number' ? Math.max(0, Math.min(100, volume)) : null,
+        muted: typeof muted === 'number' ? muted !== 0 : null,
+    };
+}
+
+function deriveRenderingControlEventUrl(controlUrl) {
+    if (!controlUrl) {
+        return '';
+    }
+    try {
+        const url = new URL(controlUrl);
+        if (url.pathname.includes('/upnp/control/')) {
+            url.pathname = url.pathname.replace('/upnp/control/', '/upnp/event/');
+            return url.href;
+        }
+    } catch (e) {
+        // ignore
+    }
+    return '';
+}
+
+async function ensureRenderingControlUrls(device) {
+    if (!device || !device.ip) {
+        return;
+    }
+
+    if (device.renderingControlUrl && !device.renderingControlEventUrl) {
+        const derived = deriveRenderingControlEventUrl(device.renderingControlUrl);
+        if (derived) {
+            device.renderingControlEventUrl = derived;
+            updateConfigDeviceFromDiscovery(device, {
+                id: device.id,
+                ip: device.ip,
+                mac: device.mac,
+                renderingControlEventUrl: derived,
+            });
+        }
+    }
+
+    if (device.renderingControlUrl && device.renderingControlEventUrl) {
+        return;
+    }
+
+    const discovered = discoveredByIp.get(device.ip);
+    if (discovered) {
+        let changed = false;
+        if (!device.renderingControlUrl && discovered.renderingControlUrl) {
+            device.renderingControlUrl = discovered.renderingControlUrl;
+            changed = true;
+        }
+        if (!device.renderingControlEventUrl && discovered.renderingControlEventUrl) {
+            device.renderingControlEventUrl = discovered.renderingControlEventUrl;
+            changed = true;
+        }
+        if (changed) {
+            updateConfigDeviceFromDiscovery(device, {
+                id: device.id,
+                ip: device.ip,
+                mac: device.mac,
+                renderingControlUrl: device.renderingControlUrl,
+                renderingControlEventUrl: device.renderingControlEventUrl,
+            });
+        }
+    }
+
+    if (device.renderingControlUrl && device.renderingControlEventUrl) {
+        return;
+    }
+
+    const now = Date.now();
+    if (device._renderingControlLookupTs && now - device._renderingControlLookupTs < 300000) {
+        return;
+    }
+    device._renderingControlLookupTs = now;
+
+    let location = await discoverSsdpLocationForIp(device.ip, 'urn:schemas-upnp-org:service:RenderingControl:1', 1200);
+    if (!location) {
+        location = await discoverSsdpLocationForIp(device.ip, 'urn:schemas-upnp-org:device:MediaRenderer:1', 1200);
+    }
+    if (!location) {
+        location = await discoverSsdpLocationForIp(device.ip, 'ssdp:all', 1200);
+    }
+    if (!location) {
+        return;
+    }
+
+    const desc = await fetchUpnpDescription(location, 1500);
+    if (!desc) {
+        return;
+    }
+    if (desc.renderingControlUrl) {
+        device.renderingControlUrl = desc.renderingControlUrl;
+    }
+    if (desc.renderingControlEventUrl) {
+        device.renderingControlEventUrl = desc.renderingControlEventUrl;
+    }
+    if (device.renderingControlUrl && !device.renderingControlEventUrl) {
+        const derived = deriveRenderingControlEventUrl(device.renderingControlUrl);
+        if (derived) {
+            device.renderingControlEventUrl = derived;
+        }
+    }
+    if (device.renderingControlUrl || device.renderingControlEventUrl) {
+        updateConfigDeviceFromDiscovery(device, {
+            id: device.id,
+            ip: device.ip,
+            mac: device.mac,
+            renderingControlUrl: device.renderingControlUrl,
+            renderingControlEventUrl: device.renderingControlEventUrl,
+        });
+    }
+}
+
+async function getRenderingControlUrl(device) {
+    await ensureRenderingControlUrls(device);
+    return device.renderingControlUrl || '';
+}
+
+async function getRenderingControlEventUrl(device) {
+    await ensureRenderingControlUrls(device);
+    return device.renderingControlEventUrl || '';
+}
+
+async function discoverSsdpLocationForIp(ip, searchTarget, timeoutMs) {
+    if (!ip) {
+        return '';
+    }
+    return new Promise(resolve => {
+        let done = false;
+        const finish = value => {
+            if (done) {
+                return;
+            }
+            done = true;
+            try {
+                client.stop();
+            } catch (e) {
+                // ignore
+            }
+            resolve(value || '');
+        };
+        const client = new SsdpClient();
+        client.on('response', (headers, statusCode, rinfo) => {
+            if (!rinfo || rinfo.address !== ip) {
+                return;
+            }
+            const location = headers.LOCATION || headers.Location || headers.location || '';
+            if (location) {
+                finish(location);
+            }
+        });
+        client.search(searchTarget || 'ssdp:all');
+        setTimeout(() => finish(''), timeoutMs || 1000);
+    });
+}
+
+function stopUpnpNotifyServer() {
+    if (!upnpNotifyServer) {
+        return;
+    }
+    try {
+        upnpNotifyServer.close();
+    } catch (e) {
+        // ignore
+    }
+    upnpNotifyServer = null;
+    upnpNotifyPort = 0;
+}
+
+function cleanupUpnpSubscriptions() {
+    for (const [deviceId, sub] of upnpSubscriptionsByDeviceId.entries()) {
+        if (sub && sub.renewTimer) {
+            clearTimeout(sub.renewTimer);
+        }
+        if (sub && sub.sid) {
+            upnpSidToDeviceId.delete(sub.sid);
+        }
+        if (sub && sub.eventUrl && sub.sid) {
+            upnpUnsubscribe(sub.eventUrl, sub.sid).catch(() => undefined);
+        }
+        upnpSubscriptionsByDeviceId.delete(deviceId);
+    }
+    upnpSidToDeviceId.clear();
+}
+
+async function ensureUpnpNotifyServer() {
+    if (upnpNotifyServer) {
+        return;
+    }
+
+    upnpNotifyServer = http.createServer((req, res) => {
+        if (!req || req.method !== 'NOTIFY') {
+            res.writeHead(200);
+            res.end('ok');
+            return;
+        }
+
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        req.on('end', () => {
+            handleUpnpNotify(req, body).catch(() => undefined);
+            res.writeHead(200);
+            res.end();
+        });
+    });
+
+    await new Promise((resolve, reject) => {
+        upnpNotifyServer.once('error', reject);
+        upnpNotifyServer.listen(0, '0.0.0.0', () => {
+            const addr = upnpNotifyServer.address();
+            upnpNotifyPort = addr && typeof addr === 'object' ? addr.port : 0;
+            resolve();
+        });
+    });
+    adapter.log.debug(`UPnP notify server listening on port ${upnpNotifyPort}`);
+}
+
+async function getLocalIpForTarget(targetIp) {
+    if (!targetIp) {
+        return '';
+    }
+    return new Promise(resolve => {
+        const socket = dgram.createSocket('udp4');
+        socket.once('error', () => {
+            try {
+                socket.close();
+            } catch (e) {
+                // ignore
+            }
+            resolve('');
+        });
+        socket.connect(1900, targetIp, () => {
+            let addr = '';
+            try {
+                addr = socket.address().address;
+            } catch (e) {
+                addr = '';
+            }
+            try {
+                socket.close();
+            } catch (e) {
+                // ignore
+            }
+            resolve(addr || '');
+        });
+    });
+}
+
+function getFirstLocalIp() {
+    const nets = os.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+        const entries = nets[name] || [];
+        for (const net of entries) {
+            if (!net || net.family !== 'IPv4') {
+                continue;
+            }
+            if (net.internal) {
+                continue;
+            }
+            return net.address;
+        }
+    }
+    return '';
+}
+
+function decodeXmlEntities(text) {
+    if (!text || typeof text !== 'string') {
+        return '';
+    }
+    return text
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, '&');
+}
+
+function parseUpnpLastChange(body) {
+    if (!body || typeof body !== 'string') {
+        return { volume: null, muted: null };
+    }
+    const lastChangeMatch = body.match(/<LastChange>([\s\S]*?)<\/LastChange>/i);
+    if (!lastChangeMatch || !lastChangeMatch[1]) {
+        return { volume: null, muted: null };
+    }
+    const lastChange = decodeXmlEntities(lastChangeMatch[1]);
+
+    // Example: <Volume channel="Master" val="6"/>
+    const volMatch = lastChange.match(/<Volume[^>]*channel=["']Master["'][^>]*val=["'](\d+)["']/i);
+    const muteMatch = lastChange.match(/<Mute[^>]*channel=["']Master["'][^>]*val=["'](\d+)["']/i);
+    const volume = volMatch?.[1] ? parseInt(volMatch[1], 10) : null;
+    const muteNum = muteMatch?.[1] ? parseInt(muteMatch[1], 10) : null;
+    return {
+        volume: Number.isFinite(volume) ? Math.max(0, Math.min(100, volume)) : null,
+        muted: Number.isFinite(muteNum) ? muteNum !== 0 : null,
+    };
+}
+
+async function handleUpnpNotify(req, body) {
+    const sid = (req.headers && req.headers.sid) || '';
+    if (!sid) {
+        return;
+    }
+    const deviceId = upnpSidToDeviceId.get(sid);
+    if (!deviceId) {
+        return;
+    }
+    const device = devicesById.get(deviceId);
+    if (!device) {
+        return;
+    }
+    const { volume, muted } = parseUpnpLastChange(body);
+    if (typeof volume === 'number' && Number.isFinite(volume)) {
+        device.lastKnownVolume = volume;
+        await adapter.setStateAsync(`${device.name}.state.volume`, volume, true);
+    }
+    if (typeof muted === 'boolean') {
+        device.lastKnownMuted = muted;
+        await adapter.setStateAsync(`${device.name}.state.muted`, muted, true);
+    }
+    await adapter.setStateAsync(`${device.name}.info.online`, true, true);
+    markSeen(device);
+    adapter.log.debug(`UPnP notify for ${device.name}: volume=${volume ?? '-'} muted=${muted ?? '-'}`);
+}
+
+function dropUpnpSubscription(deviceId) {
+    const sub = upnpSubscriptionsByDeviceId.get(deviceId);
+    if (!sub) {
+        return;
+    }
+    if (sub.renewTimer) {
+        clearTimeout(sub.renewTimer);
+    }
+    upnpSubscriptionsByDeviceId.delete(deviceId);
+    if (sub.sid) {
+        upnpSidToDeviceId.delete(sub.sid);
+    }
+    if (sub.eventUrl && sub.sid) {
+        upnpUnsubscribe(sub.eventUrl, sub.sid).catch(() => undefined);
+    }
+}
+
+async function ensureUpnpEventSubscription(device) {
+    if (!device || device.api !== 'hj' || !device.ip) {
+        return;
+    }
+    await ensureUpnpNotifyServer();
+    if (!upnpNotifyPort) {
+        return;
+    }
+    const eventUrl = await getRenderingControlEventUrl(device);
+    if (!eventUrl) {
+        return;
+    }
+
+    const existing = upnpSubscriptionsByDeviceId.get(device.id);
+    const now = Date.now();
+    if (
+        existing &&
+        existing.sid &&
+        existing.eventUrl === eventUrl &&
+        typeof existing.expiresAt === 'number' &&
+        now < existing.expiresAt - 20000
+    ) {
+        return;
+    }
+
+    if (existing) {
+        dropUpnpSubscription(device.id);
+    }
+
+    const localIp = (await getLocalIpForTarget(device.ip)) || getFirstLocalIp();
+    if (!localIp) {
+        return;
+    }
+    const callbackUrl = `http://${localIp}:${upnpNotifyPort}/upnp-notify`;
+    const sub = await upnpSubscribe(eventUrl, callbackUrl);
+    if (!sub || !sub.sid) {
+        return;
+    }
+    upnpSidToDeviceId.set(sub.sid, device.id);
+
+    const timeoutSec = sub.timeoutSec || 300;
+    const expiresAt = Date.now() + timeoutSec * 1000;
+    const renewDelay = Math.max(30000, Math.floor(timeoutSec * 0.8) * 1000);
+    const renewTimer = setTimeout(() => renewUpnpSubscription(device.id), renewDelay);
+
+    upnpSubscriptionsByDeviceId.set(device.id, { sid: sub.sid, eventUrl, expiresAt, renewTimer });
+    adapter.log.debug(`UPnP subscribed for ${device.name}: sid=${sub.sid} timeout=${timeoutSec}s`);
+}
+
+async function renewUpnpSubscription(deviceId) {
+    const sub = upnpSubscriptionsByDeviceId.get(deviceId);
+    if (!sub || !sub.sid || !sub.eventUrl) {
+        return;
+    }
+    try {
+        const timeoutSec = (await upnpRenew(sub.eventUrl, sub.sid)) || 300;
+        sub.expiresAt = Date.now() + timeoutSec * 1000;
+        const renewDelay = Math.max(30000, Math.floor(timeoutSec * 0.8) * 1000);
+        sub.renewTimer = setTimeout(() => renewUpnpSubscription(deviceId), renewDelay);
+        upnpSubscriptionsByDeviceId.set(deviceId, sub);
+        adapter.log.debug(`UPnP renewed for ${deviceId}: sid=${sub.sid} timeout=${timeoutSec}s`);
+    } catch (e) {
+        adapter.log.debug(`UPnP renew failed for ${deviceId}: ${e.message}`);
+        dropUpnpSubscription(deviceId);
+    }
+}
+
+function requestTimeoutToSeconds(value, defaultSeconds) {
+    if (!value || typeof value !== 'string') {
+        return defaultSeconds;
+    }
+    const match = value.match(/Second-(\\d+)/i);
+    const parsed = match && match[1] ? parseInt(match[1], 10) : NaN;
+    return Number.isFinite(parsed) ? parsed : defaultSeconds;
+}
+
+async function upnpSubscribe(eventUrl, callbackUrl) {
+    const url = new URL(eventUrl);
+    const options = {
+        host: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : 80,
+        path: url.pathname + (url.search || ''),
+        method: 'SUBSCRIBE',
+        headers: {
+            CALLBACK: `<${callbackUrl}>`,
+            NT: 'upnp:event',
+            TIMEOUT: 'Second-300',
+        },
+    };
+
+    return new Promise((resolve, reject) => {
+        const req = http.request(options, res => {
+            res.resume();
+            const sid = res.headers.sid || '';
+            if (!sid || res.statusCode < 200 || res.statusCode >= 300) {
+                return reject(new Error(`SUBSCRIBE failed (status ${res.statusCode || 0})`));
+            }
+            const timeoutSec = requestTimeoutToSeconds(res.headers.timeout, 300);
+            resolve({ sid, timeoutSec });
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
+
+async function upnpRenew(eventUrl, sid) {
+    const url = new URL(eventUrl);
+    const options = {
+        host: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : 80,
+        path: url.pathname + (url.search || ''),
+        method: 'SUBSCRIBE',
+        headers: {
+            SID: sid,
+            TIMEOUT: 'Second-300',
+        },
+    };
+
+    return new Promise((resolve, reject) => {
+        const req = http.request(options, res => {
+            res.resume();
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                return reject(new Error(`SUBSCRIBE renew failed (status ${res.statusCode || 0})`));
+            }
+            resolve(requestTimeoutToSeconds(res.headers.timeout, 300));
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
+
+async function upnpUnsubscribe(eventUrl, sid) {
+    const url = new URL(eventUrl);
+    const options = {
+        host: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : 80,
+        path: url.pathname + (url.search || ''),
+        method: 'UNSUBSCRIBE',
+        headers: {
+            SID: sid,
+        },
+    };
+
+    return new Promise((resolve, reject) => {
+        const req = http.request(options, res => {
+            res.resume();
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                return reject(new Error(`UNSUBSCRIBE failed (status ${res.statusCode || 0})`));
+            }
+            resolve();
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
+
+async function upnpGetRenderingControlValue(controlUrl, action, tagName) {
+    const body = `<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:${action} xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+      <InstanceID>0</InstanceID>
+      <Channel>Master</Channel>
+    </u:${action}>
+  </s:Body>
+</s:Envelope>`;
+
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 1500);
+        const response = await fetch(controlUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'text/xml; charset="utf-8"',
+                SOAPACTION: `"urn:schemas-upnp-org:service:RenderingControl:1#${action}"`,
+            },
+            body,
+            signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (!response.ok) {
+            return null;
+        }
+        const text = await response.text();
+        const match = text.match(new RegExp(`<${tagName}>([^<]+)</${tagName}>`, 'i'));
+        if (!match || !match[1]) {
+            return null;
+        }
+        const parsed = parseInt(match[1], 10);
+        return Number.isNaN(parsed) ? null : parsed;
     } catch (e) {
         return null;
     }
