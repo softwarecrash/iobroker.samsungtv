@@ -10,7 +10,6 @@ pnpm-debug.log*
 .DS_Store
 .idea/
 .vscode/
-.commitinfo
 .env
 .env.*
 coverage/

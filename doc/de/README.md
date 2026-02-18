@@ -75,7 +75,6 @@ Hinweis: Nicht jeder TV unterstützt jeden Key. Manche Keys wirken nur, wenn ein
 - Bei H/J/JU-Geräten wird HJ bevorzugt, wenn verfügbar. Tizen-Remote wird ansonsten versucht und bei „unrecognized method“ automatisch auf HJ umgestellt.
 - Falls Legacy-Objekte existieren, werden Warnungen im Log ausgegeben.
 - Adapter wurde auf `samsungtv` umbenannt, um Konflikte mit dem alten `samsung`-Adapter zu vermeiden.
-- Bei Installation über URL wird eine Instanz automatisch angelegt. (Überspringen mit `IOBROKER_SKIP_POSTINSTALL=1`)
 
 ## Changelog
 Siehe `io-package.json` (`common.news`) oder die GitHub-Releases für Details.

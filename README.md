@@ -77,7 +77,6 @@ Note: not every TV supports every key. Some keys only work when a menu/focus is 
 - For H/J/JU devices, HJ is preferred when available. Tizen remote is attempted otherwise and switches to HJ automatically if the TV reports "unrecognized method".
 - If legacy objects exist, warnings are logged.
 - Adapter is renamed to `samsungtv` to avoid conflicts with the old `samsung` adapter.
-- When installing via URL, an instance is created automatically (skip with `IOBROKER_SKIP_POSTINSTALL=1`).
 
 ## Changelog
 ### 0.0.25

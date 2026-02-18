@@ -59,7 +59,7 @@
     "platform": "Javascript/Node.js",
     "mode": "daemon",
     "icon": "samsung.png",
-    "extIcon": "https://raw.githubusercontent.com/softwarecrash/iobroker.samsungtv/main/admin/samsung.png",
+    "extIcon": "https://raw.githubusercontent.com/softwarecrash/ioBroker.samsungtv/main/admin/samsung.png",
     "readme": "README.md",
     "licenseInformation": {
       "license": "MIT",

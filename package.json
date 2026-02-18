@@ -57,7 +57,6 @@
     "test:package": "node scripts/run-mocha.js test/package --exit",
     "test:integration": "node scripts/run-mocha.js test/integration --exit",
     "test": "npm run test:js && npm run test:package",
-    "lint": "eslint -c eslint.config.mjs .",
-    "postinstall": "node scripts/postinstall.js"
+    "lint": "eslint -c eslint.config.mjs ."
   }
 }
