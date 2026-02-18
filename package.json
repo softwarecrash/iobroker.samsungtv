@@ -39,7 +39,7 @@
     "@iobroker/adapter-core": "^3.3.2",
     "bonjour-service": "^1.2.1",
     "fast-xml-parser": "^4.5.0",
-    "node-fetch": "^2.6.7",
+    "node-fetch": "^3.3.2",
     "node-ssdp": "^4.0.1",
     "wake_on_lan": "^1.0.0",
     "ws": "^8.17.1"
