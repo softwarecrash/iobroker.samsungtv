@@ -50,7 +50,7 @@
     "@iobroker/testing": "^5.2.2",
     "@types/node": "^24.10.1",
     "typescript": "~5.9.3",
-    "globals": "^16.3.0"
+    "globals": "^17.3.0"
   },
   "scripts": {
     "test:js": "node scripts/run-mocha.js --config test/mocharc.custom.json \"{!(node_modules|test)/**/*.test.js,*.test.js,test/**/test!(PackageFiles|Startup).js}\"",
